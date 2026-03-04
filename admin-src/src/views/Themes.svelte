@@ -4,14 +4,22 @@
 
   let installSource = $state('');
   let busy = $state({});
+  let licenseByTheme = $state({});
 
   function normalizePreview(value) {
     const raw = String(value || '').trim();
     if (raw === '') return null;
-    if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/')) {
-      return raw;
-    }
+    if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/')) return raw;
     return '/' + raw;
+  }
+
+  function setBusy(id, value) {
+    busy = { ...busy, [id]: value };
+  }
+
+  function priceLabel(row) {
+    const value = Number(row?.price_eur ?? 0);
+    return Number.isFinite(value) && value > 0 ? `${value.toFixed(0)} EUR` : 'Kostenlos';
   }
 
   function buildCatalog(installed, registry) {
@@ -24,9 +32,14 @@
         name: item.name || item.id,
         description: item.description || '',
         preview: normalizePreview(item.preview || item.screenshot || item.thumbnail),
-        installed: false,
-        active: false,
-        source: 'registry'
+        installed: !!item.installed,
+        active: !!item.active,
+        source: item.type || 'registry',
+        price_eur: Number(item.price_eur ?? 0),
+        seller: item.seller || 'Community',
+        requires_license: !!item.requires_license,
+        has_license: !!item.has_license,
+        checkout_url: item.checkout_url || ''
       });
     }
 
@@ -37,18 +50,20 @@
         name: item.id,
         description: '',
         preview: null,
-        installed: false,
-        active: false,
-        source: 'site'
+        source: item.source || 'site',
+        price_eur: 0,
+        seller: item.source === 'core' ? 'atoll-cms' : 'Site',
+        requires_license: false,
+        has_license: false,
+        checkout_url: ''
       };
 
       map.set(item.id, {
         ...existing,
-        name: existing.name || item.id,
         preview: normalizePreview(item.preview) || existing.preview,
         installed: true,
         active: !!item.active,
-        source: item.source || 'site'
+        source: item.source || existing.source
       });
     }
 
@@ -60,17 +75,15 @@
     });
   }
 
-  function setBusy(id, value) {
-    busy = { ...busy, [id]: value };
-  }
-
   async function refreshThemeData() {
-    const [t, s] = await Promise.all([
+    const [t, s, reg] = await Promise.all([
       api('/admin/api/themes'),
-      api('/admin/api/settings')
+      api('/admin/api/settings'),
+      api('/admin/api/theme-registry')
     ]);
     themes.set(t.themes || []);
     settings.set(s.settings || {});
+    themeRegistry.set(reg.registry || []);
   }
 
   async function activateTheme(id) {
@@ -91,15 +104,27 @@
     }
   }
 
-  async function installFromRegistry(id) {
-    if (busy[id]) return;
+  async function installFromRegistry(row) {
+    const id = row?.id;
+    if (!id || busy[id]) return;
+
+    const licenseKey = String(licenseByTheme[id] || '').trim();
+    if (row?.requires_license && !row?.has_license && licenseKey === '') {
+      addToast('Dieses Theme benoetigt einen Lizenzschluessel.', 'error');
+      return;
+    }
+
     setBusy(id, true);
     try {
       await api('/admin/api/themes/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
+        body: JSON.stringify({
+          id,
+          license_key: licenseKey !== '' ? licenseKey : undefined
+        })
       });
+      licenseByTheme = { ...licenseByTheme, [id]: '' };
       await refreshThemeData();
       addToast('Theme installiert.', 'success');
     } catch (err) {
@@ -157,12 +182,12 @@
 <div class="themes-view">
   <div class="page-header">
     <h1>Themes</h1>
-    <p>Ein Katalog mit allen verfuegbaren Themes. Installieren, aktivieren, deinstallieren.</p>
+    <p>Marketplace fuer freie und kostenpflichtige Themes.</p>
   </div>
 
   <div class="section-card">
     <div class="section-header">
-      <h3>Theme Katalog</h3>
+      <h3>Theme Marketplace</h3>
     </div>
 
     <div class="catalog-grid">
@@ -186,6 +211,11 @@
               <p class="theme-description">{t.description}</p>
             {/if}
 
+            <p class="price-line">
+              <strong>{priceLabel(t)}</strong>
+              <span>{t.seller || 'Community'}</span>
+            </p>
+
             <div class="theme-meta">
               {#if t.active}
                 <span class="badge badge--active">Aktiv</span>
@@ -199,9 +229,26 @@
 
             <div class="theme-actions">
               {#if !t.installed}
-                <button class="btn btn--primary" disabled={!!busy[t.id]} onclick={() => installFromRegistry(t.id)}>
+                {#if t.requires_license && !t.has_license}
+                  <input
+                    class="license-input"
+                    type="text"
+                    placeholder="Lizenzschluessel"
+                    value={licenseByTheme[t.id] || ''}
+                    oninput={(event) => {
+                      const value = event.currentTarget?.value || '';
+                      licenseByTheme = { ...licenseByTheme, [t.id]: value };
+                    }}
+                  >
+                {/if}
+
+                <button class="btn btn--primary" disabled={!!busy[t.id]} onclick={() => installFromRegistry(t)}>
                   {busy[t.id] ? 'Installiere...' : 'Installieren'}
                 </button>
+
+                {#if t.checkout_url}
+                  <a class="buy-link" href={t.checkout_url} target="_blank" rel="noreferrer">Kaufen</a>
+                {/if}
               {:else}
                 {#if !t.active}
                   <button class="btn" disabled={!!busy[t.id]} onclick={() => activateTheme(t.id)}>
@@ -345,6 +392,24 @@
     min-height: 2.4em;
   }
 
+  .price-line {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.82rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .price-line strong {
+    color: var(--text);
+    font-size: 0.9rem;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
   .theme-meta {
     display: flex;
     align-items: center;
@@ -389,6 +454,18 @@
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .license-input {
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #0a1518;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
   }
 
   .btn {
@@ -433,6 +510,16 @@
   .btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .buy-link {
+    font-size: 0.8rem;
+    color: #fbbf24;
+    text-decoration: none;
+  }
+
+  .buy-link:hover {
+    text-decoration: underline;
   }
 
   .install-form {
