@@ -7,6 +7,25 @@
   let updaterChannel = $state('stable');
   let updaterManifestUrl = $state('');
   let selectedTheme = $state('default');
+  let smtpDriver = $state('mail');
+  let smtpHost = $state('localhost');
+  let smtpPort = $state('587');
+  let smtpUsername = $state('');
+  let smtpPassword = $state('');
+  let smtpEncryption = $state('tls');
+  let smtpSendmailPath = $state('');
+  let smtpFromEmail = $state('noreply@example.com');
+  let smtpFromName = $state('atoll-cms');
+  let smtpPostmarkToken = $state('');
+  let smtpPostmarkEndpoint = $state('https://api.postmarkapp.com/email');
+  let smtpMailgunDomain = $state('');
+  let smtpMailgunApiKey = $state('');
+  let smtpMailgunEndpoint = $state('');
+  let smtpSesRegion = $state('eu-central-1');
+  let smtpSesAccessKey = $state('');
+  let smtpSesSecretKey = $state('');
+  let smtpSesSessionToken = $state('');
+  let smtpSesEndpoint = $state('');
   let backupS3Enabled = $state(false);
   let backupS3Endpoint = $state('');
   let backupS3Region = $state('eu-central-1');
@@ -33,6 +52,25 @@
     updaterChannel = $settings?.updater?.channel || 'stable';
     updaterManifestUrl = $settings?.updater?.manifest_url || '';
     selectedTheme = $settings?.appearance?.theme || 'default';
+    smtpDriver = $settings?.smtp?.driver || 'mail';
+    smtpHost = $settings?.smtp?.host || 'localhost';
+    smtpPort = String($settings?.smtp?.port || '587');
+    smtpUsername = $settings?.smtp?.username || '';
+    smtpPassword = $settings?.smtp?.password || '';
+    smtpEncryption = $settings?.smtp?.encryption || 'tls';
+    smtpSendmailPath = $settings?.smtp?.sendmail_path || '';
+    smtpFromEmail = $settings?.smtp?.from_email || 'noreply@example.com';
+    smtpFromName = $settings?.smtp?.from_name || 'atoll-cms';
+    smtpPostmarkToken = $settings?.smtp?.api?.postmark?.token || '';
+    smtpPostmarkEndpoint = $settings?.smtp?.api?.postmark?.endpoint || 'https://api.postmarkapp.com/email';
+    smtpMailgunDomain = $settings?.smtp?.api?.mailgun?.domain || '';
+    smtpMailgunApiKey = $settings?.smtp?.api?.mailgun?.api_key || '';
+    smtpMailgunEndpoint = $settings?.smtp?.api?.mailgun?.endpoint || '';
+    smtpSesRegion = $settings?.smtp?.api?.ses?.region || 'eu-central-1';
+    smtpSesAccessKey = $settings?.smtp?.api?.ses?.access_key || '';
+    smtpSesSecretKey = $settings?.smtp?.api?.ses?.secret_key || '';
+    smtpSesSessionToken = $settings?.smtp?.api?.ses?.session_token || '';
+    smtpSesEndpoint = $settings?.smtp?.api?.ses?.endpoint || '';
     backupS3Enabled = !!$settings?.backup?.targets?.s3?.enabled;
     backupS3Endpoint = $settings?.backup?.targets?.s3?.endpoint || '';
     backupS3Region = $settings?.backup?.targets?.s3?.region || 'eu-central-1';
@@ -74,7 +112,40 @@
               ...($settings.appearance || {}),
               theme: selectedTheme
             },
-            smtp: $settings.smtp || {},
+            smtp: {
+              ...($settings.smtp || {}),
+              driver: smtpDriver,
+              host: smtpHost,
+              port: Number(smtpPort || 587),
+              username: smtpUsername,
+              password: smtpPassword,
+              encryption: smtpEncryption,
+              sendmail_path: smtpSendmailPath,
+              from_email: smtpFromEmail,
+              from_name: smtpFromName,
+              api: {
+                ...($settings.smtp?.api || {}),
+                postmark: {
+                  ...($settings.smtp?.api?.postmark || {}),
+                  token: smtpPostmarkToken,
+                  endpoint: smtpPostmarkEndpoint
+                },
+                mailgun: {
+                  ...($settings.smtp?.api?.mailgun || {}),
+                  domain: smtpMailgunDomain,
+                  api_key: smtpMailgunApiKey,
+                  endpoint: smtpMailgunEndpoint
+                },
+                ses: {
+                  ...($settings.smtp?.api?.ses || {}),
+                  region: smtpSesRegion,
+                  access_key: smtpSesAccessKey,
+                  secret_key: smtpSesSecretKey,
+                  session_token: smtpSesSessionToken,
+                  endpoint: smtpSesEndpoint
+                }
+              }
+            },
             backup: {
               ...($settings.backup || {}),
               targets: {
@@ -192,6 +263,125 @@
           {/each}
         </select>
       </div>
+
+      <div class="fieldset">
+        <h4>Mail Versand</h4>
+        <p class="field-note">Treiber: `mail`, `smtp`, `sendmail`, `postmark`, `mailgun`, `ses`.</p>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="smtp-driver">Treiber</label>
+          <select id="smtp-driver" bind:value={smtpDriver}>
+            <option value="mail">mail (PHP)</option>
+            <option value="smtp">smtp</option>
+            <option value="sendmail">sendmail</option>
+            <option value="postmark">postmark (API)</option>
+            <option value="mailgun">mailgun (API)</option>
+            <option value="ses">ses (API)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="smtp-from-email">From E-Mail</label>
+          <input id="smtp-from-email" bind:value={smtpFromEmail} placeholder="noreply@example.com">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="smtp-from-name">From Name</label>
+        <input id="smtp-from-name" bind:value={smtpFromName} placeholder="atoll-cms">
+      </div>
+
+      {#if smtpDriver === 'smtp'}
+        <div class="field-row">
+          <div class="field">
+            <label for="smtp-host">SMTP Host</label>
+            <input id="smtp-host" bind:value={smtpHost} placeholder="smtp.example.com">
+          </div>
+          <div class="field">
+            <label for="smtp-port">SMTP Port</label>
+            <input id="smtp-port" bind:value={smtpPort} placeholder="587">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="smtp-user">SMTP Benutzer</label>
+            <input id="smtp-user" bind:value={smtpUsername}>
+          </div>
+          <div class="field">
+            <label for="smtp-pass">SMTP Passwort</label>
+            <input id="smtp-pass" bind:value={smtpPassword} type="password">
+          </div>
+        </div>
+        <div class="field">
+          <label for="smtp-encryption">SMTP Verschluesselung</label>
+          <input id="smtp-encryption" bind:value={smtpEncryption} placeholder="tls / ssl / ''">
+        </div>
+      {/if}
+
+      {#if smtpDriver === 'sendmail'}
+        <div class="field">
+          <label for="smtp-sendmail-path">Sendmail Pfad</label>
+          <input id="smtp-sendmail-path" bind:value={smtpSendmailPath} placeholder="/usr/sbin/sendmail -bs">
+        </div>
+      {/if}
+
+      {#if smtpDriver === 'postmark'}
+        <div class="field-row">
+          <div class="field">
+            <label for="smtp-postmark-token">Postmark Token</label>
+            <input id="smtp-postmark-token" bind:value={smtpPostmarkToken} type="password" placeholder="env:POSTMARK_TOKEN">
+          </div>
+          <div class="field">
+            <label for="smtp-postmark-endpoint">Postmark Endpoint</label>
+            <input id="smtp-postmark-endpoint" bind:value={smtpPostmarkEndpoint} placeholder="https://api.postmarkapp.com/email">
+          </div>
+        </div>
+      {/if}
+
+      {#if smtpDriver === 'mailgun'}
+        <div class="field-row">
+          <div class="field">
+            <label for="smtp-mailgun-domain">Mailgun Domain</label>
+            <input id="smtp-mailgun-domain" bind:value={smtpMailgunDomain} placeholder="mg.example.com">
+          </div>
+          <div class="field">
+            <label for="smtp-mailgun-key">Mailgun API Key</label>
+            <input id="smtp-mailgun-key" bind:value={smtpMailgunApiKey} type="password" placeholder="env:MAILGUN_API_KEY">
+          </div>
+        </div>
+        <div class="field">
+          <label for="smtp-mailgun-endpoint">Mailgun Endpoint (optional)</label>
+          <input id="smtp-mailgun-endpoint" bind:value={smtpMailgunEndpoint} placeholder="https://api.mailgun.net/v3/<domain>/messages">
+        </div>
+      {/if}
+
+      {#if smtpDriver === 'ses'}
+        <div class="field-row">
+          <div class="field">
+            <label for="smtp-ses-region">SES Region</label>
+            <input id="smtp-ses-region" bind:value={smtpSesRegion} placeholder="eu-central-1">
+          </div>
+          <div class="field">
+            <label for="smtp-ses-access">SES Access Key</label>
+            <input id="smtp-ses-access" bind:value={smtpSesAccessKey}>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="smtp-ses-secret">SES Secret Key</label>
+            <input id="smtp-ses-secret" bind:value={smtpSesSecretKey} type="password" placeholder="env:AWS_SECRET_ACCESS_KEY">
+          </div>
+          <div class="field">
+            <label for="smtp-ses-token">SES Session Token (optional)</label>
+            <input id="smtp-ses-token" bind:value={smtpSesSessionToken} type="password" placeholder="env:AWS_SESSION_TOKEN">
+          </div>
+        </div>
+        <div class="field">
+          <label for="smtp-ses-endpoint">SES Endpoint (optional)</label>
+          <input id="smtp-ses-endpoint" bind:value={smtpSesEndpoint} placeholder="https://email.eu-central-1.amazonaws.com/v2/email/outbound-emails">
+        </div>
+      {/if}
 
       <div class="fieldset">
         <h4>Backup Ziele</h4>
