@@ -1,5 +1,5 @@
 <script>
-  import { collections, plugins, themes, security, currentView } from '../lib/stores.js';
+  import { collections, plugins, themes, security, dashboardWidgets, currentView } from '../lib/stores.js';
 
   function navigate(view) {
     currentView.set(view);
@@ -85,6 +85,27 @@
       </div>
     </div>
   </div>
+
+  {#if $dashboardWidgets.length > 0}
+    <div class="widget plugin-widget-block">
+      <div class="widget-header">
+        <h3>Plugin Widgets</h3>
+      </div>
+      <div class="plugin-widget-grid">
+        {#each $dashboardWidgets as widget}
+          <article class="plugin-widget-card">
+            <h4>{widget.title}</h4>
+            {#if widget.value}
+              <p class="plugin-widget-value">{widget.value}</p>
+            {/if}
+            {#if widget.text}
+              <p class="plugin-widget-text">{widget.text}</p>
+            {/if}
+          </article>
+        {/each}
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -170,6 +191,43 @@
     border: 1px solid var(--line);
     border-radius: 14px;
     overflow: hidden;
+  }
+
+  .plugin-widget-block {
+    margin-top: 1rem;
+  }
+
+  .plugin-widget-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem;
+    padding: 1rem 1.25rem 1.25rem;
+  }
+
+  .plugin-widget-card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.8rem;
+    background: var(--surface-2);
+  }
+
+  .plugin-widget-card h4 {
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .plugin-widget-value {
+    margin-top: 0.4rem;
+    font-size: 1.2rem;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  .plugin-widget-text {
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--muted);
   }
 
   .widget-header {

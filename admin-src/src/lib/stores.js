@@ -15,6 +15,8 @@ export const plugins = writable([]);
 export const pluginRegistry = writable([]);
 export const themes = writable([]);
 export const themeRegistry = writable([]);
+export const adminMenu = writable([]);
+export const dashboardWidgets = writable([]);
 export const submissions = writable([]);
 export const settings = writable({});
 

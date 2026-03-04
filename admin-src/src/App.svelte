@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { user, csrf, currentView, collections, plugins, pluginRegistry, themes, themeRegistry, entries, currentCollection, currentEntry, currentEntryId, settings, security, loading } from './lib/stores.js';
+  import { user, csrf, currentView, collections, plugins, pluginRegistry, themes, themeRegistry, adminMenu, dashboardWidgets, entries, currentCollection, currentEntry, currentEntryId, settings, security, loading } from './lib/stores.js';
   import { api } from './lib/api.js';
 
   import Sidebar from './components/Sidebar.svelte';
@@ -26,12 +26,14 @@
       csrf.set(me.csrf);
       security.update((s) => ({ ...s, twofaEnabled: !!me?.security?.twofa_enabled }));
 
-      const [col, plug, plugReg, thm, thmReg, sett, audit] = await Promise.all([
+      const [col, plug, plugReg, thm, thmReg, menuData, widgetData, sett, audit] = await Promise.all([
         api('/admin/api/collections'),
         api('/admin/api/plugins'),
         api('/admin/api/plugin-registry'),
         api('/admin/api/themes'),
         api('/admin/api/theme-registry'),
+        api('/admin/api/menu'),
+        api('/admin/api/dashboard/widgets'),
         api('/admin/api/settings'),
         api('/admin/api/security/audit?limit=100')
       ]);
@@ -41,6 +43,8 @@
       pluginRegistry.set(plugReg.registry || []);
       themes.set(thm.themes || []);
       themeRegistry.set(thmReg.registry || []);
+      adminMenu.set(menuData.items || []);
+      dashboardWidgets.set(widgetData.widgets || []);
       settings.set(sett.settings);
       security.update((s) => ({ ...s, auditEntries: audit.entries || [] }));
 

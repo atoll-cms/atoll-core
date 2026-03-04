@@ -148,6 +148,7 @@ final class App
                 $this->root . '/admin',
                 $this->coreRoot . '/admin',
             ],
+            hooks: $hooks,
             security: $security,
             content: $content,
             cache: $cache,
