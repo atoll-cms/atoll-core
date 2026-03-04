@@ -6,10 +6,19 @@ Core runtime for atoll-cms.
 
 - PHP runtime (`src/`)
 - Admin SPA assets (`admin/`)
-- Built-in themes (`themes/default`, `themes/business`, `themes/editorial`, `themes/portfolio`)
+- Built-in fallback theme (`themes/default`)
 - Island bundles (`islands/`)
 - Core migrations (`migrations/`)
 - Release utilities (`tools/`)
+
+## Official external themes
+
+Official themes are maintained as separate repositories:
+
+- [atoll-theme-skeleton](https://github.com/atoll-cms/atoll-theme-skeleton)
+- [atoll-theme-business](https://github.com/atoll-cms/atoll-theme-business)
+- [atoll-theme-editorial](https://github.com/atoll-cms/atoll-theme-editorial)
+- [atoll-theme-portfolio](https://github.com/atoll-cms/atoll-theme-portfolio)
 
 ## Versioning
 
