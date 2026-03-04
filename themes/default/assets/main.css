@@ -861,6 +861,25 @@ h3 {
   transform: translateY(0);
 }
 
+.contact-form .captcha-widget {
+  margin: 0 0 var(--space-lg);
+}
+
+.contact-form .status {
+  margin-top: var(--space-md);
+  min-height: 1.25em;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.contact-form .status[data-type='success'] {
+  color: var(--brand-strong);
+}
+
+.contact-form .status[data-type='error'] {
+  color: var(--danger);
+}
+
 .honeypot {
   position: absolute;
   left: -9999px;

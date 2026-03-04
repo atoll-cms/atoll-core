@@ -8,6 +8,11 @@
   let editorMarkdown = $state('');
   let previewHtml = $state('');
   let showPreview = $state(false);
+  let seoScore = $state(0);
+  let seoChecks = $state([]);
+  let seoSnippetTitle = $state('');
+  let seoSnippetUrl = $state('');
+  let seoSnippetDescription = $state('');
 
   $effect(() => {
     if ($currentEntry) {
@@ -19,6 +24,180 @@
       editorMarkdown = $currentEntry.markdown || '';
       previewHtml = $currentEntry.content || '';
     }
+  });
+
+  $effect(() => {
+    if (!$currentEntry) {
+      seoScore = 0;
+      seoChecks = [];
+      seoSnippetTitle = '';
+      seoSnippetUrl = '';
+      seoSnippetDescription = '';
+      return;
+    }
+
+    const frontmatter = parseFrontmatter(editorFrontmatter);
+    const title = String(frontmatter.seo_title || editorTitle || frontmatter.title || '').trim();
+    const description = String(
+      frontmatter.seo_description || frontmatter.excerpt || markdownExcerpt(editorMarkdown, 160)
+    ).trim();
+    const slug = String(frontmatter.slug || $currentEntry.slug || $currentEntry.id || '').trim();
+    const canonicalUrl = String($currentEntry.url || buildEntryUrl($currentCollection, slug)).trim();
+
+    seoSnippetTitle = title || '(Fehlender SEO-Titel)';
+    seoSnippetUrl = canonicalUrl || '/';
+    seoSnippetDescription = description || 'Keine Meta-Description gesetzt.';
+
+    const checks = [];
+    let score = 0;
+
+    const titleLength = title.length;
+    if (titleLength >= 30 && titleLength <= 60) {
+      checks.push({
+        label: 'SEO-Titel',
+        status: 'good',
+        message: `${titleLength} Zeichen (ideal 30-60).`,
+        points: 20,
+        max: 20
+      });
+      score += 20;
+    } else if (titleLength > 0) {
+      checks.push({
+        label: 'SEO-Titel',
+        status: 'warn',
+        message: `${titleLength} Zeichen, besser 30-60.`,
+        points: 10,
+        max: 20
+      });
+      score += 10;
+    } else {
+      checks.push({
+        label: 'SEO-Titel',
+        status: 'bad',
+        message: 'Fehlt komplett.',
+        points: 0,
+        max: 20
+      });
+    }
+
+    const descriptionLength = description.length;
+    if (descriptionLength >= 120 && descriptionLength <= 160) {
+      checks.push({
+        label: 'Meta-Description',
+        status: 'good',
+        message: `${descriptionLength} Zeichen (ideal 120-160).`,
+        points: 25,
+        max: 25
+      });
+      score += 25;
+    } else if (descriptionLength >= 80 && descriptionLength <= 220) {
+      checks.push({
+        label: 'Meta-Description',
+        status: 'warn',
+        message: `${descriptionLength} Zeichen, noch optimierbar.`,
+        points: 12,
+        max: 25
+      });
+      score += 12;
+    } else {
+      checks.push({
+        label: 'Meta-Description',
+        status: 'bad',
+        message: 'Zu kurz/lang oder fehlt.',
+        points: 0,
+        max: 25
+      });
+    }
+
+    if (/^#\s+/m.test(editorMarkdown)) {
+      checks.push({
+        label: 'H1 im Content',
+        status: 'good',
+        message: 'Mindestens eine H1 gefunden.',
+        points: 10,
+        max: 10
+      });
+      score += 10;
+    } else {
+      checks.push({
+        label: 'H1 im Content',
+        status: 'warn',
+        message: 'Keine H1-Markdown-Headline gefunden.',
+        points: 0,
+        max: 10
+      });
+    }
+
+    if (/^##\s+/m.test(editorMarkdown)) {
+      checks.push({
+        label: 'Zwischenueberschriften',
+        status: 'good',
+        message: 'H2-Struktur vorhanden.',
+        points: 10,
+        max: 10
+      });
+      score += 10;
+    } else {
+      checks.push({
+        label: 'Zwischenueberschriften',
+        status: 'warn',
+        message: 'Fuer Lesbarkeit H2 nutzen.',
+        points: 0,
+        max: 10
+      });
+    }
+
+    const hasImage = !!frontmatter.seo_image || !!frontmatter.featured_image || /!\[[^\]]*]\([^)]+\)/.test(editorMarkdown);
+    if (hasImage) {
+      checks.push({
+        label: 'Preview-Bild',
+        status: 'good',
+        message: 'OG/Featured Image vorhanden.',
+        points: 15,
+        max: 15
+      });
+      score += 15;
+    } else {
+      checks.push({
+        label: 'Preview-Bild',
+        status: 'warn',
+        message: 'Kein OG/Featured Image gesetzt.',
+        points: 0,
+        max: 15
+      });
+    }
+
+    const textLength = plainMarkdown(editorMarkdown).length;
+    if (textLength >= 300) {
+      checks.push({
+        label: 'Inhaltstiefe',
+        status: 'good',
+        message: `${textLength} Zeichen Text.`,
+        points: 10,
+        max: 10
+      });
+      score += 10;
+    } else if (textLength >= 120) {
+      checks.push({
+        label: 'Inhaltstiefe',
+        status: 'warn',
+        message: `${textLength} Zeichen Text, etwas knapp.`,
+        points: 5,
+        max: 10
+      });
+      score += 5;
+    } else {
+      checks.push({
+        label: 'Inhaltstiefe',
+        status: 'bad',
+        message: 'Sehr wenig Content.',
+        points: 0,
+        max: 10
+      });
+    }
+
+    seoChecks = checks;
+    seoScore = Math.max(0, Math.min(100, score));
   });
 
   async function selectCollection(event) {
@@ -71,6 +250,44 @@
     } finally {
       saving = false;
     }
+  }
+
+  function parseFrontmatter(json) {
+    try {
+      const parsed = JSON.parse(json || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function plainMarkdown(markdown) {
+    return String(markdown || '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`[^`]*`/g, ' ')
+      .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+      .replace(/\[[^\]]*]\([^)]+\)/g, ' ')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/[*_>~-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function markdownExcerpt(markdown, maxLength = 160) {
+    const text = plainMarkdown(markdown);
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+  }
+
+  function buildEntryUrl(collection, slug) {
+    const cleanSlug = String(slug || '').trim();
+    if (!cleanSlug || cleanSlug === 'index') {
+      return '/';
+    }
+    if (collection === 'pages') {
+      return `/${cleanSlug.replace(/^\/+/, '')}`;
+    }
+    return `/${String(collection || '').replace(/^\/+|\/+$/g, '')}/${cleanSlug.replace(/^\/+/, '')}`;
   }
 </script>
 
@@ -135,6 +352,30 @@
               <button type="submit" class="save-btn" disabled={saving}>
                 {saving ? 'Speichert...' : 'Speichern'}
               </button>
+            </div>
+          </div>
+
+          <div class="seo-panel">
+            <div class="seo-score">
+              <div class="seo-score__value">{seoScore}</div>
+              <div class="seo-score__label">SEO Score</div>
+              <div class="seo-progress">
+                <span style={`width: ${seoScore}%`}></span>
+              </div>
+            </div>
+            <div class="seo-snippet">
+              <div class="seo-snippet__title">{seoSnippetTitle}</div>
+              <div class="seo-snippet__url">{seoSnippetUrl}</div>
+              <div class="seo-snippet__description">{seoSnippetDescription}</div>
+            </div>
+            <div class="seo-checks">
+              {#each seoChecks as check}
+                <div class="seo-check" class:good={check.status === 'good'} class:warn={check.status === 'warn'} class:bad={check.status === 'bad'}>
+                  <span class="seo-check__name">{check.label}</span>
+                  <span class="seo-check__points">{check.points}/{check.max}</span>
+                  <span class="seo-check__message">{check.message}</span>
+                </div>
+              {/each}
             </div>
           </div>
 
@@ -396,6 +637,141 @@
     min-height: 0;
   }
 
+  .seo-panel {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(15, 28, 31, 0.5), rgba(15, 28, 31, 0.18));
+  }
+
+  .seo-score {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(8, 20, 24, 0.65);
+  }
+
+  .seo-score__value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--brand);
+    line-height: 1;
+  }
+
+  .seo-score__label {
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .seo-progress {
+    margin-top: 0.35rem;
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+
+  .seo-progress span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, #ef4444, #f59e0b 50%, #22c55e);
+  }
+
+  .seo-snippet {
+    min-width: 0;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(8, 20, 24, 0.65);
+  }
+
+  .seo-snippet__title {
+    color: #8ab4f8;
+    font-size: 0.95rem;
+    margin-bottom: 0.2rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .seo-snippet__url {
+    color: #34a853;
+    font-size: 0.75rem;
+    margin-bottom: 0.3rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .seo-snippet__description {
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .seo-checks {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 0.5rem;
+  }
+
+  .seo-check {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.15rem 0.5rem;
+    padding: 0.55rem 0.65rem;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: rgba(8, 20, 24, 0.5);
+  }
+
+  .seo-check.good {
+    border-color: rgba(34, 197, 94, 0.35);
+    background: rgba(34, 197, 94, 0.1);
+  }
+
+  .seo-check.warn {
+    border-color: rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .seo-check.bad {
+    border-color: rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .seo-check__name {
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+
+  .seo-check__points {
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+
+  .seo-check__message {
+    grid-column: 1 / -1;
+    font-size: 0.74rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
   .editor-panes {
     flex: 1;
     display: flex;
@@ -512,6 +888,10 @@
 
     .entry-list {
       max-height: 200px;
+    }
+
+    .seo-panel {
+      grid-template-columns: 1fr;
     }
   }
 </style>

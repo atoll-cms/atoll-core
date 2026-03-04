@@ -127,7 +127,7 @@ final class AdminController
             $endpoint === '/entry/delete' && $request->method === 'POST' => $this->deleteEntry($request),
             $endpoint === '/forms/submissions' && $request->method === 'GET' => $this->formSubmissions($request),
             $endpoint === '/cache/clear' && $request->method === 'POST' => $this->clearCache(),
-            $endpoint === '/backup/create' && $request->method === 'POST' => Response::json($this->backup->create()),
+            $endpoint === '/backup/create' && $request->method === 'POST' => $this->createBackup(),
             $endpoint === '/plugins' && $request->method === 'GET' => Response::json(['ok' => true, 'plugins' => $this->plugins->list()]),
             $endpoint === '/plugin-registry' && $request->method === 'GET' => $this->pluginRegistry(),
             $endpoint === '/theme-registry' && $request->method === 'GET' => $this->themeRegistry(),
@@ -340,6 +340,22 @@ final class AdminController
         return Response::json(['ok' => true]);
     }
 
+    private function createBackup(): Response
+    {
+        $result = $this->backup->create();
+        if (($result['ok'] ?? false) === true) {
+            $this->security->recordAudit('backup.create', [
+                'user' => $this->security->currentUser(),
+                'file' => $result['file'] ?? null,
+                'partial' => (bool) ($result['partial'] ?? false),
+                'errors' => $result['errors'] ?? [],
+                'uploads' => $result['uploads'] ?? [],
+            ]);
+        }
+
+        return Response::json($result);
+    }
+
     private function togglePlugin(Request $request): Response
     {
         $payload = $request->isJson() ? $request->json() : $request->post;
@@ -377,6 +393,7 @@ final class AdminController
                 'updater' => Config::get($this->config, 'updater', []),
                 'appearance' => Config::get($this->config, 'appearance', []),
                 'smtp' => Config::get($this->config, 'smtp', []),
+                'backup' => Config::get($this->config, 'backup', []),
                 'security' => Config::get($this->config, 'security', []),
             ],
         ]);
@@ -393,7 +410,7 @@ final class AdminController
 
         $previousTheme = (string) Config::get($this->config, 'appearance.theme', 'default');
 
-        foreach (['name', 'base_url', 'updater', 'appearance', 'smtp', 'security'] as $key) {
+        foreach (['name', 'base_url', 'updater', 'appearance', 'smtp', 'backup', 'security'] as $key) {
             if (array_key_exists($key, $settings)) {
                 $this->config[$key] = $settings[$key];
             }

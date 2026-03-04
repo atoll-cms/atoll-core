@@ -7,6 +7,24 @@
   let updaterChannel = $state('stable');
   let updaterManifestUrl = $state('');
   let selectedTheme = $state('default');
+  let backupS3Enabled = $state(false);
+  let backupS3Endpoint = $state('');
+  let backupS3Region = $state('eu-central-1');
+  let backupS3Bucket = $state('');
+  let backupS3AccessKey = $state('');
+  let backupS3SecretKey = $state('');
+  let backupS3Prefix = $state('atoll-backups');
+  let backupS3PathStyle = $state(true);
+
+  let backupSftpEnabled = $state(false);
+  let backupSftpHost = $state('');
+  let backupSftpPort = $state('22');
+  let backupSftpUser = $state('');
+  let backupSftpPassword = $state('');
+  let backupSftpPrivateKeyFile = $state('');
+  let backupSftpPublicKeyFile = $state('');
+  let backupSftpPassphrase = $state('');
+  let backupSftpPath = $state('/backups/atoll');
   let saving = $state(false);
 
   $effect(() => {
@@ -15,6 +33,24 @@
     updaterChannel = $settings?.updater?.channel || 'stable';
     updaterManifestUrl = $settings?.updater?.manifest_url || '';
     selectedTheme = $settings?.appearance?.theme || 'default';
+    backupS3Enabled = !!$settings?.backup?.targets?.s3?.enabled;
+    backupS3Endpoint = $settings?.backup?.targets?.s3?.endpoint || '';
+    backupS3Region = $settings?.backup?.targets?.s3?.region || 'eu-central-1';
+    backupS3Bucket = $settings?.backup?.targets?.s3?.bucket || '';
+    backupS3AccessKey = $settings?.backup?.targets?.s3?.access_key || '';
+    backupS3SecretKey = $settings?.backup?.targets?.s3?.secret_key || '';
+    backupS3Prefix = $settings?.backup?.targets?.s3?.prefix || 'atoll-backups';
+    backupS3PathStyle = $settings?.backup?.targets?.s3?.path_style ?? true;
+
+    backupSftpEnabled = !!$settings?.backup?.targets?.sftp?.enabled;
+    backupSftpHost = $settings?.backup?.targets?.sftp?.host || '';
+    backupSftpPort = String($settings?.backup?.targets?.sftp?.port || '22');
+    backupSftpUser = $settings?.backup?.targets?.sftp?.username || '';
+    backupSftpPassword = $settings?.backup?.targets?.sftp?.password || '';
+    backupSftpPrivateKeyFile = $settings?.backup?.targets?.sftp?.private_key_file || '';
+    backupSftpPublicKeyFile = $settings?.backup?.targets?.sftp?.public_key_file || '';
+    backupSftpPassphrase = $settings?.backup?.targets?.sftp?.passphrase || '';
+    backupSftpPath = $settings?.backup?.targets?.sftp?.path || '/backups/atoll';
   });
 
   async function saveSettings(event) {
@@ -39,6 +75,39 @@
               theme: selectedTheme
             },
             smtp: $settings.smtp || {},
+            backup: {
+              ...($settings.backup || {}),
+              targets: {
+                ...($settings.backup?.targets || {}),
+                local: {
+                  ...($settings.backup?.targets?.local || {}),
+                  enabled: true
+                },
+                s3: {
+                  ...($settings.backup?.targets?.s3 || {}),
+                  enabled: backupS3Enabled,
+                  endpoint: backupS3Endpoint,
+                  region: backupS3Region,
+                  bucket: backupS3Bucket,
+                  access_key: backupS3AccessKey,
+                  secret_key: backupS3SecretKey,
+                  prefix: backupS3Prefix,
+                  path_style: backupS3PathStyle
+                },
+                sftp: {
+                  ...($settings.backup?.targets?.sftp || {}),
+                  enabled: backupSftpEnabled,
+                  host: backupSftpHost,
+                  port: Number(backupSftpPort || 22),
+                  username: backupSftpUser,
+                  password: backupSftpPassword,
+                  private_key_file: backupSftpPrivateKeyFile,
+                  public_key_file: backupSftpPublicKeyFile,
+                  passphrase: backupSftpPassphrase,
+                  path: backupSftpPath
+                }
+              }
+            },
             security: $settings.security || {}
           }
         })
@@ -58,7 +127,14 @@
     try {
       const result = await api('/admin/api/backup/create', { method: 'POST' });
       if (result.ok) {
-        addToast(`Backup erstellt: ${result.file}`, 'success');
+        if (result.partial) {
+          const errorText = Array.isArray(result.errors) && result.errors.length > 0
+            ? ` (${result.errors.join('; ')})`
+            : '';
+          addToast(`Backup lokal erstellt, Remote unvollstaendig${errorText}`, 'info', 7000);
+        } else {
+          addToast(`Backup erstellt: ${result.file}`, 'success');
+        }
       } else {
         addToast(result.error || 'Backup fehlgeschlagen.', 'error');
       }
@@ -116,6 +192,93 @@
           {/each}
         </select>
       </div>
+
+      <div class="fieldset">
+        <h4>Backup Ziele</h4>
+        <p class="field-note">Lokales ZIP wird immer erzeugt. Optionaler Upload zu S3/SFTP.</p>
+      </div>
+
+      <div class="field field--check">
+        <label><input type="checkbox" bind:checked={backupS3Enabled}> S3 Upload aktivieren</label>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-s3-endpoint">S3 Endpoint</label>
+          <input id="backup-s3-endpoint" bind:value={backupS3Endpoint} placeholder="https://s3.eu-central-1.amazonaws.com">
+        </div>
+        <div class="field">
+          <label for="backup-s3-region">S3 Region</label>
+          <input id="backup-s3-region" bind:value={backupS3Region} placeholder="eu-central-1">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-s3-bucket">S3 Bucket</label>
+          <input id="backup-s3-bucket" bind:value={backupS3Bucket}>
+        </div>
+        <div class="field">
+          <label for="backup-s3-prefix">S3 Prefix</label>
+          <input id="backup-s3-prefix" bind:value={backupS3Prefix} placeholder="atoll-backups">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-s3-access">S3 Access Key</label>
+          <input id="backup-s3-access" bind:value={backupS3AccessKey}>
+        </div>
+        <div class="field">
+          <label for="backup-s3-secret">S3 Secret Key</label>
+          <input id="backup-s3-secret" bind:value={backupS3SecretKey} type="password">
+        </div>
+      </div>
+      <div class="field field--check">
+        <label><input type="checkbox" bind:checked={backupS3PathStyle}> S3 Path-Style URL</label>
+      </div>
+
+      <div class="field field--check">
+        <label><input type="checkbox" bind:checked={backupSftpEnabled}> SFTP Upload aktivieren</label>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-sftp-host">SFTP Host</label>
+          <input id="backup-sftp-host" bind:value={backupSftpHost}>
+        </div>
+        <div class="field">
+          <label for="backup-sftp-port">SFTP Port</label>
+          <input id="backup-sftp-port" bind:value={backupSftpPort}>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-sftp-user">SFTP Benutzer</label>
+          <input id="backup-sftp-user" bind:value={backupSftpUser}>
+        </div>
+        <div class="field">
+          <label for="backup-sftp-pass">SFTP Passwort</label>
+          <input id="backup-sftp-pass" bind:value={backupSftpPassword} type="password">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-sftp-private">Private Key Datei</label>
+          <input id="backup-sftp-private" bind:value={backupSftpPrivateKeyFile} placeholder="/pfad/id_rsa">
+        </div>
+        <div class="field">
+          <label for="backup-sftp-public">Public Key Datei</label>
+          <input id="backup-sftp-public" bind:value={backupSftpPublicKeyFile} placeholder="/pfad/id_rsa.pub">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-sftp-passphrase">Key Passphrase</label>
+          <input id="backup-sftp-passphrase" bind:value={backupSftpPassphrase} type="password">
+        </div>
+        <div class="field">
+          <label for="backup-sftp-path">Remote Pfad</label>
+          <input id="backup-sftp-path" bind:value={backupSftpPath} placeholder="/backups/atoll">
+        </div>
+      </div>
+
       <button type="submit" class="save-btn" disabled={saving}>
         {saving ? 'Speichert...' : 'Speichern'}
       </button>
@@ -198,6 +361,39 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0.75rem;
+  }
+
+  .fieldset {
+    margin: 1rem 0 0.25rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--line);
+  }
+
+  .fieldset h4 {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+
+  .field-note {
+    margin: 0.25rem 0 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  .field--check label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.85rem;
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .field--check input[type="checkbox"] {
+    width: auto;
   }
 
   .save-btn {
