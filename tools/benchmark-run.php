@@ -17,6 +17,7 @@ $root = resolveRoot($options['root'] ?? null);
 $configPath = resolvePath($root, (string) ($options['config'] ?? 'benchmarks/targets.yaml'));
 $outPath = resolvePath($root, (string) ($options['out'] ?? ('benchmarks/results/' . date('Ymd-His') . '.json')));
 $rounds = max(1, (int) ($options['rounds'] ?? 3));
+$maxErrorRate = max(0.0, min(100.0, (float) ($options['max-error-rate'] ?? 5.0)));
 $only = parseCsv((string) ($options['only'] ?? ''));
 
 if (!is_file($configPath)) {
@@ -51,6 +52,7 @@ $run = [
     ],
     'config_path' => $configPath,
     'rounds' => $rounds,
+    'max_error_rate' => $maxErrorRate,
     'defaults' => $defaults,
     'results' => [],
 ];
@@ -77,7 +79,31 @@ foreach ($scenarios as $scenario) {
     );
 
     $scenarioError = null;
+    $preflight = preflightRequest(
+        $scenario['url'],
+        (int) $effective['timeout_ms'],
+        $effective['headers']
+    );
+    $result['preflight'] = $preflight;
+    if (($preflight['ok'] ?? false) !== true) {
+        $scenarioError = sprintf(
+            'Preflight failed (status=%d errno=%d%s)',
+            (int) ($preflight['status'] ?? 0),
+            (int) ($preflight['errno'] ?? 0),
+            (($preflight['error'] ?? '') !== '' ? ', error=' . (string) $preflight['error'] : '')
+        );
+        echo "  preflight: failed ({$scenarioError})\n";
+    } else {
+        echo sprintf(
+            "  preflight: ok (status=%d)\n",
+            (int) ($preflight['status'] ?? 0)
+        );
+    }
+
     for ($round = 1; $round <= $rounds; $round++) {
+        if ($scenarioError !== null) {
+            break;
+        }
         try {
             runWarmup(
                 $scenario['url'],
@@ -113,9 +139,25 @@ foreach ($scenarios as $scenario) {
         $result['status'] = 'error';
         $result['error'] = $scenarioError ?? 'No data';
     } else {
-        $result['status'] = 'ok';
-        $result['summary'] = summarizeRounds($result['rounds']);
-        $okCount++;
+        $summary = summarizeRounds($result['rounds']);
+        $result['summary'] = $summary;
+        $errorRate = (float) ($summary['error_rate'] ?? 100.0);
+        $success = (float) ($summary['success'] ?? 0.0);
+
+        if ($success <= 0.0) {
+            $result['status'] = 'error';
+            $result['error'] = 'No successful responses captured. Check host/port binding and target URLs.';
+        } elseif ($errorRate > $maxErrorRate) {
+            $result['status'] = 'error';
+            $result['error'] = sprintf(
+                'Error rate %.2f%% exceeds threshold %.2f%%.',
+                $errorRate,
+                $maxErrorRate
+            );
+        } else {
+            $result['status'] = 'ok';
+            $okCount++;
+        }
     }
 
     $run['results'][] = $result;
@@ -327,7 +369,40 @@ function runWarmup(string $url, int $requests, int $timeoutMs, array $headers): 
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT_MS, min($timeoutMs, 3000));
         curl_setopt($ch, CURLOPT_HTTPHEADER, formatHeaders($headers));
         curl_exec($ch);
+        $ch = null;
     }
+}
+
+/**
+ * @param array<string, string> $headers
+ * @return array{ok:bool,status:int,errno:int,error:string}
+ */
+function preflightRequest(string $url, int $timeoutMs, array $headers): array
+{
+    $ch = curl_init($url);
+    if ($ch === false) {
+        throw new RuntimeException('curl_init failed during preflight.');
+    }
+
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
+    curl_setopt($ch, CURLOPT_TIMEOUT_MS, $timeoutMs);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT_MS, min($timeoutMs, 3000));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, formatHeaders($headers));
+    curl_exec($ch);
+
+    $errno = curl_errno($ch);
+    $error = trim((string) curl_error($ch));
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $ch = null;
+
+    return [
+        'ok' => $errno === 0 && $status > 0 && $status < 400,
+        'status' => $status,
+        'errno' => $errno,
+        'error' => $error,
+    ];
 }
 
 /**
@@ -402,7 +477,7 @@ function runRound(string $url, int $requests, int $concurrency, int $timeoutMs, 
             $content = (string) curl_multi_getcontent($ch);
             $bytes += strlen($content);
 
-            $statusKey = (string) $status;
+            $statusKey = 'status_' . ($status > 0 ? (string) $status : '0');
             $httpStatus[$statusKey] = ($httpStatus[$statusKey] ?? 0) + 1;
 
             if ($errno !== 0 || $status <= 0 || $status >= 400) {
@@ -528,9 +603,9 @@ function printSummary(array $results): void
         echo str_pad((string) ($result['id'] ?? ''), 22)
             . str_pad((string) ($result['system'] ?? ''), 14)
             . str_pad($status, 10)
-            . str_pad($status === 'ok' ? number_format((float) ($summary['rps'] ?? 0), 2) : '-', 12)
-            . str_pad($status === 'ok' ? number_format((float) ($summary['p95_ms'] ?? 0), 1) : '-', 12)
-            . str_pad($status === 'ok' ? number_format((float) ($summary['error_rate'] ?? 0), 2) : '-', 10)
+            . str_pad($summary !== [] ? number_format((float) ($summary['rps'] ?? 0), 2) : '-', 12)
+            . str_pad($summary !== [] ? number_format((float) ($summary['p95_ms'] ?? 0), 1) : '-', 12)
+            . str_pad($summary !== [] ? number_format((float) ($summary['error_rate'] ?? 0), 2) : '-', 10)
             . "\n";
 
         if ($status !== 'ok') {
