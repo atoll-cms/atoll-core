@@ -33,19 +33,9 @@ php tools/build-release.php
 This generates `releases/atoll-core-<version>.zip` with a top-level `core/` directory,
 compatible with `atoll core:update` / `atoll core:update:remote` in starter projects.
 
-## Benchmark tools
+## Benchmarks
 
-Core ships benchmark tooling consumed by starter CLI commands:
-
-- `tools/benchmark-run.php`
-- `tools/benchmark-report.php`
-
-Use via starter:
-
-```bash
-php bin/atoll benchmark:run --rounds=3
-php bin/atoll benchmark:report --out=benchmarks/results/latest.md
-```
+Cross-CMS-Benchmarks wurden bewusst in das separate Repo `atoll-benchmarks` ausgelagert.
 
 ## Signing a release
 
