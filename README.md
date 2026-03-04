@@ -6,7 +6,7 @@ Core runtime for atoll-cms.
 
 - PHP runtime (`src/`)
 - Admin SPA assets (`admin/`)
-- Default theme fallback (`themes/default/`)
+- Built-in themes (`themes/default`, `themes/business`, `themes/editorial`, `themes/portfolio`)
 - Island bundles (`islands/`)
 - Core migrations (`migrations/`)
 - Release utilities (`tools/`)
