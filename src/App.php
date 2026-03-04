@@ -101,7 +101,12 @@ final class App
             return $security->applyHeaders($rateLimited);
         }
 
-        $content = new ContentRepository($this->root . '/content', $hooks);
+        $content = new ContentRepository(
+            contentRoot: $this->root . '/content',
+            hooks: $hooks,
+            config: $this->config,
+            siteRoot: $this->root
+        );
         $redirects = new RedirectManager($this->root . '/content/data/redirects.yaml');
         $mailer = new Mailer($this->config);
         $forms = new FormManager($this->root . '/content/forms', $this->root . '/content/forms-submissions', $mailer, $security, $hooks);
