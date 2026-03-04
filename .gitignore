@@ -1,3 +1,4 @@
 /vendor/
 /releases/
 .DS_Store
+admin-src/node_modules/
