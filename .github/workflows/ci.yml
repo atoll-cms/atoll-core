@@ -38,9 +38,10 @@ jobs:
 
       - name: JS syntax check
         run: |
-          node --check admin/app.js
           node --check assets/js/island-loader.js
-          find islands/dist -name '*.js' -type f -print0 | xargs -0 -I{} node --check {}
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(find admin/assets islands/dist -name '*.js' -type f -print0)
 
       - name: Build release smoke test
         run: |
