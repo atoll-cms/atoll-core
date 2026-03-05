@@ -16,6 +16,7 @@
   import Themes from './views/Themes.svelte';
   import Security from './views/Security.svelte';
   import Settings from './views/Settings.svelte';
+  import PluginFrame from './views/PluginFrame.svelte';
 
   let initialized = $state(false);
 
@@ -116,6 +117,8 @@
         <Security />
       {:else if $currentView === 'settings'}
         <Settings />
+      {:else}
+        <PluginFrame />
       {/if}
     </main>
   </div>
