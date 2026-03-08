@@ -89,7 +89,7 @@
   {#if $dashboardWidgets.length > 0}
     <div class="widget plugin-widget-block">
       <div class="widget-header">
-        <h3>Plugin Widgets</h3>
+        <h3>Widgets</h3>
       </div>
       <div class="plugin-widget-grid">
         {#each $dashboardWidgets as widget}

@@ -36,6 +36,10 @@
   let backupS3SecretKey = $state('');
   let backupS3Prefix = $state('atoll-backups');
   let backupS3PathStyle = $state(true);
+  let backupScheduleEnabled = $state(false);
+  let backupScheduleFrequency = $state('daily');
+  let backupScheduleTime = $state('03:00');
+  let backupScheduleWeekday = $state('1');
 
   let backupSftpEnabled = $state(false);
   let backupSftpHost = $state('');
@@ -94,6 +98,10 @@
     backupS3SecretKey = $settings?.backup?.targets?.s3?.secret_key || '';
     backupS3Prefix = $settings?.backup?.targets?.s3?.prefix || 'atoll-backups';
     backupS3PathStyle = $settings?.backup?.targets?.s3?.path_style ?? true;
+    backupScheduleEnabled = !!$settings?.backup?.schedule?.enabled;
+    backupScheduleFrequency = $settings?.backup?.schedule?.frequency || 'daily';
+    backupScheduleTime = $settings?.backup?.schedule?.time || '03:00';
+    backupScheduleWeekday = String($settings?.backup?.schedule?.weekday || '1');
 
     backupSftpEnabled = !!$settings?.backup?.targets?.sftp?.enabled;
     backupSftpHost = $settings?.backup?.targets?.sftp?.host || '';
@@ -164,6 +172,13 @@
             },
             backup: {
               ...($settings.backup || {}),
+              schedule: {
+                ...($settings.backup?.schedule || {}),
+                enabled: backupScheduleEnabled,
+                frequency: backupScheduleFrequency,
+                time: backupScheduleTime,
+                weekday: Number(backupScheduleWeekday || 1)
+              },
               targets: {
                 ...($settings.backup?.targets || {}),
                 local: {
@@ -512,6 +527,38 @@
         <h4>Backup Ziele</h4>
         <p class="field-note">Lokales ZIP wird immer erzeugt. Optionaler Upload zu S3/SFTP.</p>
       </div>
+
+      <div class="field field--check">
+        <label><input type="checkbox" bind:checked={backupScheduleEnabled}> Geplante Backups aktivieren</label>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="backup-schedule-frequency">Rhythmus</label>
+          <select id="backup-schedule-frequency" bind:value={backupScheduleFrequency}>
+            <option value="daily">Taeglich</option>
+            <option value="weekly">Woechentlich</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="backup-schedule-time">Uhrzeit</label>
+          <input id="backup-schedule-time" type="time" bind:value={backupScheduleTime}>
+        </div>
+      </div>
+      {#if backupScheduleFrequency === 'weekly'}
+        <div class="field">
+          <label for="backup-schedule-weekday">Wochentag</label>
+          <select id="backup-schedule-weekday" bind:value={backupScheduleWeekday}>
+            <option value="1">Montag</option>
+            <option value="2">Dienstag</option>
+            <option value="3">Mittwoch</option>
+            <option value="4">Donnerstag</option>
+            <option value="5">Freitag</option>
+            <option value="6">Samstag</option>
+            <option value="7">Sonntag</option>
+          </select>
+        </div>
+      {/if}
+      <p class="field-note">Cron-Entrypoint: <code>php bin/atoll backup:run</code></p>
 
       <div class="field field--check">
         <label><input type="checkbox" bind:checked={backupS3Enabled}> S3 Upload aktivieren</label>

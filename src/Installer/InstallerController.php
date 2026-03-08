@@ -122,6 +122,12 @@ final class InstallerController
                 ],
             ],
             'backup' => [
+                'schedule' => [
+                    'enabled' => false,
+                    'frequency' => 'daily',
+                    'time' => '03:00',
+                    'weekday' => 1,
+                ],
                 'targets' => [
                     'local' => [
                         'enabled' => true,

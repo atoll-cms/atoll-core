@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Atoll\Cache\CacheManager;
+use Atoll\Backup\BackupManager;
 use Atoll\Content\ContentRepository;
 use Atoll\Hooks\HookManager;
 use Atoll\Support\Config;
@@ -26,6 +27,7 @@ $printHelp = static function (): void {
     echo "  atoll dev:local [port] [--activate=<id>]         Use sibling core repo, start dev\n";
     echo "                   [--force-links] [--setup-only] [--sync-core]\n";
     echo "  atoll cache:clear                                Clear HTML cache\n";
+    echo "  atoll backup:run [--force]                       Run scheduled backup if due\n";
     echo "  atoll content:index:status                       Show content index status\n";
     echo "  atoll content:index:rebuild                      Rebuild SQLite content index\n";
     echo "  atoll new <path>                                 Scaffold new atoll-cms project\n";
@@ -127,6 +129,47 @@ switch ($command) {
         $cache->clear();
         echo "Cache cleared.\n";
         exit(0);
+
+    case 'backup:run':
+        $force = in_array('--force', $args, true);
+        $backup = new BackupManager($root . '/content', $root . '/backups', $config);
+        $result = $backup->runScheduled($force);
+
+        if ((bool) ($result['skipped'] ?? false)) {
+            $reason = (string) ($result['reason'] ?? 'skipped');
+            if ($reason === 'disabled') {
+                echo "Backup scheduler is disabled (backup.schedule.enabled: false).\n";
+            } elseif ($reason === 'not_due') {
+                $nextDue = (string) (($result['status']['next_due_at'] ?? '') ?: 'unknown');
+                echo "Backup not due yet. Next due: {$nextDue}\n";
+            } else {
+                echo "Backup skipped ({$reason}).\n";
+            }
+            exit(0);
+        }
+
+        $ok = (bool) ($result['ok'] ?? false);
+        $duration = (int) ($result['duration_ms'] ?? 0);
+        if ($ok) {
+            echo "Backup completed.\n";
+            echo "File: " . (string) ($result['file'] ?? '') . "\n";
+            echo "Target: " . (string) ($result['target'] ?? 'local') . "\n";
+            echo "Duration: {$duration} ms\n";
+            if ((bool) ($result['partial'] ?? false)) {
+                $errors = implode('; ', array_map('strval', $result['errors'] ?? []));
+                if ($errors !== '') {
+                    echo "Warnings: {$errors}\n";
+                }
+            }
+            exit(0);
+        }
+
+        echo "Backup failed.\n";
+        $error = (string) ($result['error'] ?? 'unknown error');
+        if ($error !== '') {
+            echo "Error: {$error}\n";
+        }
+        exit(1);
 
     case 'content:index:status':
     case 'content:index:rebuild':

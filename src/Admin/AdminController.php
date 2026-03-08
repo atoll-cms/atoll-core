@@ -150,6 +150,7 @@ final class AdminController
             $endpoint === '/redirects' && $request->method === 'GET' => $this->redirects(),
             $endpoint === '/redirects/save' && $request->method === 'POST' => $this->saveRedirects($request),
             $endpoint === '/cache/clear' && $request->method === 'POST' => $this->clearCache(),
+            $endpoint === '/backup/status' && $request->method === 'GET' => $this->backupStatus(),
             $endpoint === '/backup/create' && $request->method === 'POST' => $this->createBackup(),
             $endpoint === '/plugins' && $request->method === 'GET' => $this->pluginsList(),
             $endpoint === '/plugin-registry' && $request->method === 'GET' => $this->pluginRegistry(),
@@ -293,6 +294,7 @@ final class AdminController
     {
         $widgets = [];
         $counter = 0;
+        $this->appendDashboardWidget($widgets, $this->backupDashboardWidget(), $counter);
         foreach ($this->hooks->run('admin:dashboard', $this->security->currentUser()) as $result) {
             if (is_array($result) && array_is_list($result)) {
                 foreach ($result as $widget) {
@@ -930,6 +932,14 @@ final class AdminController
         return Response::json(['ok' => true]);
     }
 
+    private function backupStatus(): Response
+    {
+        return Response::json([
+            'ok' => true,
+            'status' => $this->backup->schedulerStatus(),
+        ]);
+    }
+
     private function createBackup(): Response
     {
         $result = $this->backup->create();
@@ -944,6 +954,63 @@ final class AdminController
         }
 
         return Response::json($result);
+    }
+
+    /**
+     * @return array{id:string,title:string,value:string,text:string}
+     */
+    private function backupDashboardWidget(): array
+    {
+        $status = $this->backup->schedulerStatus();
+        $enabled = (bool) ($status['enabled'] ?? false);
+        $due = (bool) ($status['due'] ?? false);
+        $lastSuccess = trim((string) ($status['last_success_at'] ?? ''));
+        $lastError = trim((string) ($status['last_error'] ?? ''));
+        $nextDue = trim((string) ($status['next_due_at'] ?? ''));
+        $frequency = trim((string) ($status['frequency'] ?? 'daily'));
+        $time = trim((string) ($status['time'] ?? '03:00'));
+        $weekday = (int) ($status['weekday'] ?? 1);
+        $target = trim((string) ($status['last_target'] ?? 'local'));
+
+        $value = 'Disabled';
+        if ($enabled) {
+            if ($lastError !== '') {
+                $value = 'Error';
+            } elseif ($due) {
+                $value = 'Due';
+            } elseif ($lastSuccess !== '') {
+                $value = 'Healthy';
+            } else {
+                $value = 'Waiting';
+            }
+        }
+
+        $parts = [];
+        $parts[] = $enabled
+            ? sprintf('Schedule: %s %s%s', $frequency, $time, $frequency === 'weekly' ? (' (weekday ' . $weekday . ')') : '')
+            : 'Schedule disabled';
+
+        if ($lastSuccess !== '') {
+            $parts[] = 'Last success: ' . $lastSuccess;
+            $parts[] = 'Target: ' . ($target !== '' ? $target : 'local');
+        } else {
+            $parts[] = 'Last success: none yet';
+        }
+
+        if ($nextDue !== '') {
+            $parts[] = 'Next due: ' . $nextDue;
+        }
+
+        if ($lastError !== '') {
+            $parts[] = 'Last error: ' . $lastError;
+        }
+
+        return [
+            'id' => 'backup-scheduler',
+            'title' => 'Backup Scheduler',
+            'value' => $value,
+            'text' => implode(' | ', $parts),
+        ];
     }
 
     private function pluginsList(): Response
@@ -2693,6 +2760,7 @@ final class AdminController
             '/forms/submissions/status' => 'forms.write',
             '/redirects' => 'redirects.read',
             '/redirects/save' => 'redirects.write',
+            '/backup/status' => 'dashboard.read',
             '/cache/clear', '/backup/create' => 'ops.manage',
             '/plugins', '/plugin-registry', '/plugin-page' => 'plugins.read',
             '/plugins/toggle', '/plugins/install', '/plugins/update', '/plugins/update-all', '/plugins/uninstall' => 'plugins.manage',
