@@ -19,14 +19,17 @@ final class PackageInstaller
         bool $force = false,
         bool $enable = false,
         array $config = [],
-        ?string $targetId = null
+        ?string $targetId = null,
+        array $registryEntry = []
     ): array {
         $sourceDir = self::resolveInstallSource($root, $source, 'plugin', $config);
-        if (!is_file($sourceDir . '/plugin.php')) {
+        $manifestPath = $sourceDir . '/plugin.php';
+        if (!is_file($manifestPath)) {
             throw new RuntimeException('Invalid plugin package: plugin.php missing at root.');
         }
 
         $id = self::normalizePackageId($targetId ?? basename($sourceDir));
+        self::assertPluginCompatibility($root, $id, $manifestPath, $config, $registryEntry);
         $dest = rtrim($root, '/') . '/plugins/' . $id;
         $sourceReal = realpath($sourceDir);
         $destReal = realpath($dest);
@@ -91,17 +94,24 @@ final class PackageInstaller
         ?string $licenseKey = null
     ): array {
         $normalizedId = self::normalizePackageId($id);
+        $entry = self::findRegistryEntry(rtrim($root, '/') . '/content/data/plugin-registry.json', $id);
         $localPlugin = self::resolveLocalPluginRepository($root, $normalizedId, $config);
         if ($localPlugin !== null) {
-            if ($licenseKey !== null && trim($licenseKey) !== '') {
-                self::setStoredLicense($root, 'plugins', $normalizedId, trim($licenseKey));
+            $resolved = self::resolveRegistryInstallSource($root, $entry, 'plugins', $normalizedId, $licenseKey);
+            self::assertPluginCompatibility($root, $normalizedId, $localPlugin . '/plugin.php', $config, $entry);
+            $result = self::linkPluginFromLocalRepository($root, $normalizedId, $localPlugin, $force, $enable);
+            if ($resolved['license_key'] !== null) {
+                $result['license_saved'] = true;
             }
-            return self::linkPluginFromLocalRepository($root, $normalizedId, $localPlugin, $force, $enable);
+            if (($resolved['requires_license'] ?? false) === true) {
+                $result['requires_license'] = true;
+            }
+
+            return $result;
         }
 
-        $entry = self::findRegistryEntry(rtrim($root, '/') . '/content/data/plugin-registry.json', $id);
         $resolved = self::resolveRegistryInstallSource($root, $entry, 'plugins', $normalizedId, $licenseKey);
-        $result = self::installPlugin($root, $resolved['source'], $force, $enable, $config, $normalizedId);
+        $result = self::installPlugin($root, $resolved['source'], $force, $enable, $config, $normalizedId, $entry);
         if ($resolved['license_key'] !== null) {
             $result['license_saved'] = true;
         }
@@ -451,6 +461,150 @@ final class PackageInstaller
     private static function isRemoteSource(string $value): bool
     {
         return str_starts_with($value, 'http://') || str_starts_with($value, 'https://');
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $registryEntry
+     */
+    private static function assertPluginCompatibility(
+        string $root,
+        string $pluginId,
+        string $manifestPath,
+        array $config,
+        array $registryEntry = []
+    ): void {
+        $manifestRequirements = self::parsePluginManifestRequirements($manifestPath);
+        $requiresPhp = self::mergeVersionConstraints(
+            (string) ($manifestRequirements['requires_php'] ?? ''),
+            (string) ($registryEntry['requires_php'] ?? '')
+        );
+        $requiresCore = self::mergeVersionConstraints(
+            (string) ($manifestRequirements['requires_core'] ?? ''),
+            (string) ($registryEntry['requires_core'] ?? '')
+        );
+
+        if ($requiresPhp !== '' && !self::matchesVersionConstraint(PHP_VERSION, $requiresPhp)) {
+            throw new RuntimeException(
+                sprintf(
+                    "Plugin '%s' requires PHP %s (current: %s).",
+                    $pluginId,
+                    $requiresPhp,
+                    PHP_VERSION
+                )
+            );
+        }
+
+        if ($requiresCore !== '') {
+            $coreVersion = self::currentCoreVersion($root, $config);
+            if (!self::matchesVersionConstraint($coreVersion, $requiresCore)) {
+                throw new RuntimeException(
+                    sprintf(
+                        "Plugin '%s' requires atoll-core %s (current: %s).",
+                        $pluginId,
+                        $requiresCore,
+                        $coreVersion
+                    )
+                );
+            }
+        }
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private static function parsePluginManifestRequirements(string $manifestPath): array
+    {
+        if (!is_file($manifestPath)) {
+            return [];
+        }
+
+        $raw = (string) file_get_contents($manifestPath);
+        $requirements = [];
+        foreach (['requires_php', 'requires_core'] as $field) {
+            if (preg_match('/[\'"]' . preg_quote($field, '/') . '[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/', $raw, $match) === 1) {
+                $value = trim((string) ($match[1] ?? ''));
+                if ($value !== '') {
+                    $requirements[$field] = $value;
+                }
+            }
+        }
+
+        return $requirements;
+    }
+
+    private static function mergeVersionConstraints(string $first, string $second): string
+    {
+        $parts = [];
+        $first = trim($first);
+        $second = trim($second);
+        if ($first !== '') {
+            $parts[] = $first;
+        }
+        if ($second !== '') {
+            $parts[] = $second;
+        }
+
+        return implode(',', $parts);
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private static function currentCoreVersion(string $root, array $config): string
+    {
+        $configured = Config::get($config, 'core.path', 'core');
+        $corePath = is_string($configured) && trim($configured) !== '' ? trim($configured) : 'core';
+        if (!str_starts_with($corePath, '/')) {
+            $corePath = rtrim($root, '/') . '/' . ltrim($corePath, '/');
+        }
+
+        $candidates = [
+            rtrim($corePath, '/') . '/VERSION',
+            rtrim($root, '/') . '/core/VERSION',
+        ];
+        foreach ($candidates as $file) {
+            if (!is_file($file)) {
+                continue;
+            }
+            $version = trim((string) file_get_contents($file));
+            if ($version !== '') {
+                return $version;
+            }
+        }
+
+        return '0.0.0';
+    }
+
+    private static function matchesVersionConstraint(string $version, string $constraint): bool
+    {
+        $constraint = trim($constraint);
+        if ($constraint === '') {
+            return true;
+        }
+
+        $parts = preg_split('/\s*,\s*|\s+/', $constraint) ?: [];
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if ($part === '') {
+                continue;
+            }
+
+            if (preg_match('/^(>=|<=|>|<|==|=|!=)\s*(.+)$/', $part, $match) === 1) {
+                $op = $match[1] === '=' ? '==' : $match[1];
+                $target = trim((string) ($match[2] ?? ''));
+                if ($target === '' || !version_compare($version, $target, $op)) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (!version_compare($version, $part, '==')) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static function normalizeLicenseGroupKind(string $kind): string

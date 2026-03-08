@@ -7,6 +7,7 @@
   let busy = $state({});
   let licenseByPlugin = $state({});
   let buyerByPlugin = $state({});
+  let updateAllBusy = $state(false);
 
   function setBusy(id, value) {
     busy = { ...busy, [id]: value };
@@ -67,6 +68,69 @@
       addToast(err.message, 'error');
     } finally {
       setBusy(`toggle-${id}`, false);
+    }
+  }
+
+  async function updatePlugin(id) {
+    if (!id || busy[`update-${id}`]) return;
+    setBusy(`update-${id}`, true);
+    try {
+      await api('/admin/api/plugins/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      await refreshPluginData();
+      addToast('Plugin aktualisiert.', 'success');
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setBusy(`update-${id}`, false);
+    }
+  }
+
+  async function updateAllPlugins() {
+    if (updateAllBusy) return;
+    updateAllBusy = true;
+    try {
+      const result = await api('/admin/api/plugins/update-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      const updatedCount = Array.isArray(result?.updated) ? result.updated.length : 0;
+      const errorCount = Array.isArray(result?.errors) ? result.errors.length : 0;
+      await refreshPluginData();
+      if (errorCount > 0) {
+        addToast(`${updatedCount} Plugin(s) aktualisiert, ${errorCount} Fehler.`, 'error');
+      } else {
+        addToast(`${updatedCount} Plugin(s) aktualisiert.`, 'success');
+      }
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      updateAllBusy = false;
+    }
+  }
+
+  async function uninstallPlugin(id) {
+    if (!id || busy[`uninstall-${id}`]) return;
+    if (!window.confirm('Plugin wirklich deinstallieren?')) return;
+
+    setBusy(`uninstall-${id}`, true);
+    try {
+      await api('/admin/api/plugins/uninstall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      await refreshPluginData();
+      addToast('Plugin deinstalliert.', 'success');
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      setBusy(`uninstall-${id}`, false);
     }
   }
 
@@ -168,12 +232,15 @@
   <div class="section-card">
     <div class="section-header">
       <h3>Installierte Plugins</h3>
+      <button class="action-btn" onclick={updateAllPlugins} disabled={updateAllBusy}>
+        {updateAllBusy ? 'Aktualisiere...' : 'Alle updaten'}
+      </button>
     </div>
     {#if $plugins.length > 0}
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Name</th><th>Version</th><th>Status</th><th>Aktion</th></tr>
+            <tr><th>Name</th><th>Version</th><th>Status</th><th>Aktionen</th></tr>
           </thead>
           <tbody>
             {#each $plugins as p}
@@ -182,16 +249,40 @@
                   <div class="plugin-name">{p.name}</div>
                   {#if p.description}<div class="plugin-desc">{p.description}</div>{/if}
                 </td>
-                <td><code>{p.version}</code></td>
+                <td>
+                  <code>{p.version}</code>
+                  {#if p.registry_version}
+                    <div class="plugin-version-meta">Registry: {p.registry_version}</div>
+                  {/if}
+                </td>
                 <td>
                   <span class="badge" class:badge--active={p.active} class:badge--inactive={!p.active}>
                     {p.active ? 'Aktiv' : 'Inaktiv'}
                   </span>
+                  {#if p.update_available}
+                    <span class="badge badge--update">Update verfuegbar</span>
+                  {/if}
                 </td>
                 <td>
-                  <button class="action-btn" disabled={!!busy[`toggle-${p.id}`]} onclick={() => togglePlugin(p.id, !p.active)}>
-                    {p.active ? 'Deaktivieren' : 'Aktivieren'}
-                  </button>
+                  <div class="action-row">
+                    <button class="action-btn" disabled={!!busy[`toggle-${p.id}`]} onclick={() => togglePlugin(p.id, !p.active)}>
+                      {p.active ? 'Deaktivieren' : 'Aktivieren'}
+                    </button>
+                    <button
+                      class="action-btn"
+                      disabled={!!busy[`update-${p.id}`] || !p.update_supported}
+                      onclick={() => updatePlugin(p.id)}
+                    >
+                      {busy[`update-${p.id}`] ? 'Update...' : 'Updaten'}
+                    </button>
+                    <button
+                      class="action-btn action-btn--danger"
+                      disabled={!!busy[`uninstall-${p.id}`]}
+                      onclick={() => uninstallPlugin(p.id)}
+                    >
+                      {busy[`uninstall-${p.id}`] ? 'Entferne...' : 'Deinstallieren'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -340,6 +431,10 @@
   .section-header {
     padding: 1rem 1.25rem;
     border-bottom: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
   }
 
   .section-header h3 {
@@ -378,6 +473,7 @@
 
   .plugin-name { font-weight: 500; }
   .plugin-desc { font-size: 0.8rem; color: var(--muted); margin-top: 0.15rem; }
+  .plugin-version-meta { font-size: 0.7rem; color: var(--muted); margin-top: 0.25rem; }
 
   code {
     font-family: 'JetBrains Mono', monospace;
@@ -397,6 +493,13 @@
 
   .badge--active { background: rgba(34, 197, 94, 0.12); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.28); }
   .badge--inactive { background: rgba(107, 114, 128, 0.1); color: #9ca3af; border: 1px solid rgba(107, 114, 128, 0.25); }
+  .badge--update { background: rgba(245, 158, 11, 0.12); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); margin-left: 0.35rem; }
+
+  .action-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
 
   .action-btn {
     padding: 0.35rem 0.75rem;
@@ -413,6 +516,21 @@
   .action-btn:hover {
     border-color: var(--brand);
     color: var(--brand);
+  }
+
+  .action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .action-btn--danger {
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #fca5a5;
+  }
+
+  .action-btn--danger:hover:not(:disabled) {
+    border-color: rgba(239, 68, 68, 0.6);
+    color: #fecaca;
   }
 
   .registry-grid {

@@ -146,7 +146,7 @@ final class AdminController
             $endpoint === '/forms/submissions' && $request->method === 'GET' => $this->formSubmissions($request),
             $endpoint === '/cache/clear' && $request->method === 'POST' => $this->clearCache(),
             $endpoint === '/backup/create' && $request->method === 'POST' => $this->createBackup(),
-            $endpoint === '/plugins' && $request->method === 'GET' => Response::json(['ok' => true, 'plugins' => $this->plugins->list()]),
+            $endpoint === '/plugins' && $request->method === 'GET' => $this->pluginsList(),
             $endpoint === '/plugin-registry' && $request->method === 'GET' => $this->pluginRegistry(),
             $endpoint === '/plugin-page' && $request->method === 'GET' => $this->pluginPage($request),
             $endpoint === '/theme-registry' && $request->method === 'GET' => $this->themeRegistry(),
@@ -155,6 +155,9 @@ final class AdminController
             $endpoint === '/marketplace/license/verify' && $request->method === 'POST' => $this->marketplaceLicenseVerify($request),
             $endpoint === '/plugins/toggle' && $request->method === 'POST' => $this->togglePlugin($request),
             $endpoint === '/plugins/install' && $request->method === 'POST' => $this->installPlugin($request),
+            $endpoint === '/plugins/update' && $request->method === 'POST' => $this->updatePlugin($request),
+            $endpoint === '/plugins/update-all' && $request->method === 'POST' => $this->updateAllPlugins(),
+            $endpoint === '/plugins/uninstall' && $request->method === 'POST' => $this->uninstallPlugin($request),
             $endpoint === '/themes' && $request->method === 'GET' => $this->themes(),
             $endpoint === '/themes/install' && $request->method === 'POST' => $this->installTheme($request),
             $endpoint === '/themes/activate' && $request->method === 'POST' => $this->activateTheme($request),
@@ -567,6 +570,48 @@ final class AdminController
         return Response::json($result);
     }
 
+    private function pluginsList(): Response
+    {
+        $rows = $this->plugins->list();
+        $installs = $this->loadPluginInstallState();
+        $registry = PackageInstaller::loadRegistry($this->root . '/content/data/plugin-registry.json');
+        $registryById = [];
+        foreach ($registry as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $id = trim((string) ($entry['id'] ?? ''));
+            if ($id === '') {
+                continue;
+            }
+            $registryById[$id] = $entry;
+        }
+
+        foreach ($rows as &$row) {
+            $id = trim((string) ($row['id'] ?? ''));
+            if ($id === '') {
+                continue;
+            }
+            $install = $installs[$id] ?? [];
+            $registryEntry = $registryById[$id] ?? [];
+            $row['install'] = is_array($install) ? $install : [];
+            $row['registry_version'] = is_array($registryEntry) ? trim((string) ($registryEntry['version'] ?? '')) : '';
+            $row['update_supported'] = $this->pluginHasUpdateSource($id, is_array($install) ? $install : [], is_array($registryEntry) ? $registryEntry : []);
+
+            $installedVersion = trim((string) ($row['version'] ?? ''));
+            $registryVersion = trim((string) ($row['registry_version'] ?? ''));
+            $row['update_available'] = $registryVersion !== ''
+                && $installedVersion !== ''
+                && version_compare($registryVersion, $installedVersion, '>');
+        }
+        unset($row);
+
+        return Response::json([
+            'ok' => true,
+            'plugins' => $rows,
+        ]);
+    }
+
     private function togglePlugin(Request $request): Response
     {
         $payload = $request->isJson() ? $request->json() : $request->post;
@@ -800,6 +845,7 @@ final class AdminController
         $file = $this->root . '/content/data/plugin-registry.json';
         $registry = PackageInstaller::loadRegistry($file);
         $licenses = PackageInstaller::loadLicenses($this->root);
+        $installState = $this->loadPluginInstallState();
         $pluginState = [];
         foreach ($this->plugins->list() as $plugin) {
             $pluginId = (string) ($plugin['id'] ?? '');
@@ -809,6 +855,7 @@ final class AdminController
             $pluginState[$pluginId] = [
                 'installed' => true,
                 'active' => (bool) ($plugin['active'] ?? false),
+                'version' => (string) ($plugin['version'] ?? ''),
             ];
         }
 
@@ -821,6 +868,17 @@ final class AdminController
             $requiresLicense = (bool) ($entry['requires_license'] ?? false);
             $entry['installed'] = (bool) ($pluginState[$id]['installed'] ?? false);
             $entry['active'] = (bool) ($pluginState[$id]['active'] ?? false);
+            $installedVersion = trim((string) ($pluginState[$id]['version'] ?? ''));
+            $registryVersion = trim((string) ($entry['version'] ?? ''));
+            $entry['installed_version'] = $installedVersion;
+            $entry['update_available'] = $registryVersion !== ''
+                && $installedVersion !== ''
+                && version_compare($registryVersion, $installedVersion, '>');
+            $entry['update_supported'] = $this->pluginHasUpdateSource(
+                $id,
+                is_array($installState[$id] ?? null) ? $installState[$id] : [],
+                $entry
+            );
             $entry['has_license'] = $storedLicense !== '';
             if ($requiresLicense && $storedLicense !== '') {
                 $verification = PackageInstaller::verifyMarketplaceLicense($this->root, 'plugins', $id, $storedLicense);
@@ -976,6 +1034,15 @@ final class AdminController
             return Response::json(['error' => $e->getMessage()], 422);
         }
 
+        $installedId = trim((string) ($result['id'] ?? $id));
+        if ($installedId !== '') {
+            $this->rememberPluginInstallSource(
+                $installedId,
+                $id !== '' ? 'registry' : 'source',
+                $id !== '' ? $id : $source
+            );
+        }
+
         $this->security->recordAudit('plugin.install', [
             'user' => $this->security->currentUser(),
             'plugin' => $result['id'] ?? $id,
@@ -986,6 +1053,213 @@ final class AdminController
             'installed' => $result,
             'message' => 'Plugin installed. Reload app to apply hook and route changes.',
         ]);
+    }
+
+    private function updatePlugin(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $id = trim((string) ($payload['id'] ?? ''));
+        if ($id === '') {
+            return Response::json(['error' => 'Missing plugin id'], 422);
+        }
+
+        try {
+            $result = $this->performPluginUpdate($id);
+        } catch (RuntimeException $e) {
+            return Response::json(['error' => $e->getMessage()], 422);
+        }
+
+        $this->cache->clear();
+        $this->security->recordAudit('plugin.update', [
+            'user' => $this->security->currentUser(),
+            'plugin' => $id,
+            'source_type' => $result['source_type'] ?? '',
+            'source' => $result['source'] ?? '',
+        ]);
+
+        return Response::json([
+            'ok' => true,
+            'updated' => $result,
+            'message' => 'Plugin updated. Reload app to apply hook and route changes.',
+        ]);
+    }
+
+    private function updateAllPlugins(): Response
+    {
+        $pluginIds = [];
+        foreach ($this->plugins->list() as $plugin) {
+            $id = trim((string) ($plugin['id'] ?? ''));
+            if ($id !== '') {
+                $pluginIds[] = $id;
+            }
+        }
+
+        $updated = [];
+        $errors = [];
+        foreach ($pluginIds as $id) {
+            try {
+                $updated[] = $this->performPluginUpdate($id);
+            } catch (RuntimeException $e) {
+                $errors[] = [
+                    'id' => $id,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+
+        if ($updated !== []) {
+            $this->cache->clear();
+        }
+        $this->security->recordAudit('plugin.update_all', [
+            'user' => $this->security->currentUser(),
+            'updated' => count($updated),
+            'errors' => count($errors),
+        ]);
+
+        return Response::json([
+            'ok' => $errors === [],
+            'updated' => $updated,
+            'errors' => $errors,
+        ], $errors === [] ? 200 : 207);
+    }
+
+    private function uninstallPlugin(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $id = trim((string) ($payload['id'] ?? ''));
+        if ($id === '') {
+            return Response::json(['error' => 'Missing plugin id'], 422);
+        }
+
+        $manifests = $this->plugins->all();
+        if (!isset($manifests[$id])) {
+            return Response::json(['error' => 'Plugin not found: ' . $id], 404);
+        }
+
+        $blocking = [];
+        foreach ($manifests as $pluginId => $manifest) {
+            if ($pluginId === $id) {
+                continue;
+            }
+            if (!(bool) ($manifest['active'] ?? false)) {
+                continue;
+            }
+            if (in_array($id, $this->pluginDependenciesFromManifest($manifest), true)) {
+                $blocking[] = $pluginId;
+            }
+        }
+        if ($blocking !== []) {
+            return Response::json([
+                'error' => 'Plugin is required by active plugins: ' . implode(', ', $blocking),
+            ], 422);
+        }
+
+        $path = $this->pluginInstallPath($id);
+        if (!is_dir($path) && !is_link($path)) {
+            return Response::json(['error' => 'Plugin files missing: ' . $id], 404);
+        }
+
+        try {
+            $this->assertPluginPathInsideSitePlugins($path);
+            $this->deleteFilesystemPath($path);
+        } catch (RuntimeException $e) {
+            return Response::json(['error' => $e->getMessage()], 422);
+        }
+
+        $state = $this->loadPluginStateFile();
+        unset($state[$id]);
+        $this->savePluginStateFile($state);
+        $this->removePluginInstallSource($id);
+        $this->removeStoredPluginLicense($id);
+
+        $this->cache->clear();
+        $this->security->recordAudit('plugin.uninstall', [
+            'user' => $this->security->currentUser(),
+            'plugin' => $id,
+        ]);
+
+        return Response::json([
+            'ok' => true,
+            'removed' => $id,
+            'message' => 'Plugin uninstalled. Reload app to apply hook and route changes.',
+        ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function performPluginUpdate(string $id): array
+    {
+        $id = trim($id);
+        if ($id === '') {
+            throw new RuntimeException('Missing plugin id.');
+        }
+
+        $plugins = $this->plugins->all();
+        $plugin = $plugins[$id] ?? null;
+        if (!is_array($plugin)) {
+            throw new RuntimeException('Plugin not installed: ' . $id);
+        }
+        $active = (bool) ($plugin['active'] ?? false);
+        $path = $this->pluginInstallPath($id);
+        if (!is_dir($path) && !is_link($path)) {
+            throw new RuntimeException('Plugin files missing: ' . $id);
+        }
+
+        $source = $this->resolvePluginUpdateSource($id);
+        $rollbackRoot = rtrim($this->root, '/') . '/cache/plugin-rollbacks';
+        if (!is_dir($rollbackRoot)) {
+            mkdir($rollbackRoot, 0775, true);
+        }
+        try {
+            $suffix = bin2hex(random_bytes(3));
+        } catch (\Throwable) {
+            $suffix = (string) mt_rand(1000, 9999);
+        }
+        $backupPath = $rollbackRoot . '/' . $id . '-' . date('Ymd-His') . '-' . $suffix;
+        if (!@rename($path, $backupPath)) {
+            throw new RuntimeException('Could not prepare rollback backup for plugin: ' . $id);
+        }
+
+        try {
+            if (($source['type'] ?? '') === 'source') {
+                $install = PackageInstaller::installPlugin(
+                    $this->root,
+                    (string) ($source['source'] ?? ''),
+                    false,
+                    $active,
+                    $this->config,
+                    $id
+                );
+            } else {
+                $install = PackageInstaller::installPluginFromRegistry(
+                    $this->root,
+                    $id,
+                    false,
+                    $active,
+                    $this->config
+                );
+            }
+        } catch (RuntimeException $e) {
+            if (file_exists($path) || is_link($path)) {
+                $this->deleteFilesystemPath($path);
+            }
+            if (!@rename($backupPath, $path)) {
+                throw new RuntimeException('Plugin update failed and rollback could not be restored: ' . $e->getMessage());
+            }
+            throw new RuntimeException('Plugin update failed, previous version restored: ' . $e->getMessage());
+        }
+
+        $this->deleteFilesystemPath($backupPath);
+        $this->rememberPluginInstallSource($id, (string) ($source['type'] ?? 'registry'), (string) ($source['source'] ?? $id));
+
+        return [
+            'id' => $id,
+            'source_type' => $source['type'] ?? 'registry',
+            'source' => $source['source'] ?? $id,
+            'active' => $active,
+            'installed' => $install,
+        ];
     }
 
     private function themes(): Response
@@ -1150,6 +1424,250 @@ final class AdminController
         return rtrim($corePath, '/') . '/themes';
     }
 
+    private function pluginInstallPath(string $id): string
+    {
+        return rtrim($this->root, '/') . '/plugins/' . $id;
+    }
+
+    private function assertPluginPathInsideSitePlugins(string $pluginPath): void
+    {
+        $pluginsRoot = realpath(rtrim($this->root, '/') . '/plugins');
+        $parent = realpath(dirname($pluginPath));
+        if ($pluginsRoot === false || $parent === false || $parent !== $pluginsRoot) {
+            throw new RuntimeException('Invalid plugin path.');
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $manifest
+     * @return array<int, string>
+     */
+    private function pluginDependenciesFromManifest(array $manifest): array
+    {
+        $raw = $manifest['requires_plugins'] ?? $manifest['dependencies'] ?? [];
+        $rows = [];
+
+        if (is_string($raw)) {
+            $raw = preg_split('/\s*,\s*/', $raw) ?: [];
+        }
+
+        if (is_array($raw)) {
+            if (!array_is_list($raw)) {
+                foreach ($raw as $pluginId => $constraint) {
+                    if (is_string($pluginId) && trim($pluginId) !== '') {
+                        $rows[] = trim($pluginId);
+                    } elseif (is_string($constraint) && trim($constraint) !== '') {
+                        $rows[] = trim($constraint);
+                    }
+                }
+            } else {
+                foreach ($raw as $value) {
+                    if (is_string($value) && trim($value) !== '') {
+                        $rows[] = trim($value);
+                    }
+                }
+            }
+        }
+
+        $rows = array_values(array_unique($rows));
+        sort($rows);
+        return $rows;
+    }
+
+    /**
+     * @return array<string, bool>
+     */
+    private function loadPluginStateFile(): array
+    {
+        $file = $this->root . '/content/data/plugins.yaml';
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $parsed = Yaml::parse((string) file_get_contents($file));
+        if (!is_array($parsed)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($parsed as $id => $active) {
+            if (!is_string($id) || trim($id) === '') {
+                continue;
+            }
+            $rows[$id] = (bool) $active;
+        }
+
+        ksort($rows);
+        return $rows;
+    }
+
+    /**
+     * @param array<string, bool> $state
+     */
+    private function savePluginStateFile(array $state): void
+    {
+        $file = $this->root . '/content/data/plugins.yaml';
+        if (!is_dir(dirname($file))) {
+            mkdir(dirname($file), 0775, true);
+        }
+        ksort($state);
+        file_put_contents($file, Yaml::dump($state));
+    }
+
+    private function pluginInstallStateFile(): string
+    {
+        return $this->root . '/content/data/plugin-installs.yaml';
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function loadPluginInstallState(): array
+    {
+        $file = $this->pluginInstallStateFile();
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $parsed = Yaml::parse((string) file_get_contents($file));
+        if (!is_array($parsed)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($parsed as $id => $row) {
+            if (!is_string($id) || trim($id) === '' || !is_array($row)) {
+                continue;
+            }
+            $rows[$id] = $row;
+        }
+
+        ksort($rows);
+        return $rows;
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $state
+     */
+    private function savePluginInstallState(array $state): void
+    {
+        $file = $this->pluginInstallStateFile();
+        if (!is_dir(dirname($file))) {
+            mkdir(dirname($file), 0775, true);
+        }
+        ksort($state);
+        file_put_contents($file, Yaml::dump($state));
+    }
+
+    private function rememberPluginInstallSource(string $id, string $type, string $source): void
+    {
+        $id = trim($id);
+        if ($id === '') {
+            return;
+        }
+
+        $type = strtolower(trim($type));
+        if (!in_array($type, ['registry', 'source'], true)) {
+            $type = 'source';
+        }
+
+        $source = trim($source);
+        $state = $this->loadPluginInstallState();
+        $state[$id] = [
+            'type' => $type,
+            'source' => $source,
+            'updated_at' => date('c'),
+        ];
+        $this->savePluginInstallState($state);
+    }
+
+    private function removePluginInstallSource(string $id): void
+    {
+        $state = $this->loadPluginInstallState();
+        unset($state[$id]);
+        $this->savePluginInstallState($state);
+    }
+
+    /**
+     * @param array<string, mixed> $install
+     * @param array<string, mixed> $registryEntry
+     */
+    private function pluginHasUpdateSource(string $id, array $install, array $registryEntry): bool
+    {
+        $type = strtolower(trim((string) ($install['type'] ?? '')));
+        $source = trim((string) ($install['source'] ?? ''));
+
+        if ($type === 'source' && $source !== '') {
+            return true;
+        }
+        if ($type === 'registry') {
+            return true;
+        }
+        if ($registryEntry !== []) {
+            return true;
+        }
+
+        return is_dir($this->pluginInstallPath($id));
+    }
+
+    /**
+     * @return array{type:string,source:string}
+     */
+    private function resolvePluginUpdateSource(string $id): array
+    {
+        $installs = $this->loadPluginInstallState();
+        $install = $installs[$id] ?? [];
+        $type = strtolower(trim((string) ($install['type'] ?? '')));
+        $source = trim((string) ($install['source'] ?? ''));
+
+        if ($type === 'source' && $source !== '') {
+            return [
+                'type' => 'source',
+                'source' => $source,
+            ];
+        }
+
+        $registry = PackageInstaller::loadRegistry($this->root . '/content/data/plugin-registry.json');
+        foreach ($registry as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            if (trim((string) ($entry['id'] ?? '')) === $id) {
+                return [
+                    'type' => 'registry',
+                    'source' => $id,
+                ];
+            }
+        }
+
+        if ($type === 'registry' || $type === '') {
+            throw new RuntimeException('No update source found in registry for plugin: ' . $id);
+        }
+
+        throw new RuntimeException('No update source configured for plugin: ' . $id);
+    }
+
+    private function removeStoredPluginLicense(string $id): void
+    {
+        $licenses = PackageInstaller::loadLicenses($this->root);
+        if (!is_array($licenses['plugins'] ?? null)) {
+            return;
+        }
+        if (!array_key_exists($id, $licenses['plugins'])) {
+            return;
+        }
+
+        unset($licenses['plugins'][$id]);
+        $file = $this->root . '/content/data/licenses.yaml';
+        if (!is_dir(dirname($file))) {
+            mkdir(dirname($file), 0775, true);
+        }
+        file_put_contents($file, Yaml::dump([
+            'plugins' => $licenses['plugins'],
+            'themes' => is_array($licenses['themes'] ?? null) ? $licenses['themes'] : [],
+        ]));
+    }
+
     private function resolveThemePreview(string $themeDir, string $themeId, string $source): ?string
     {
         $metaFile = rtrim($themeDir, '/') . '/theme.yaml';
@@ -1227,7 +1745,7 @@ final class AdminController
         }
 
         if (!@rmdir($path)) {
-            throw new RuntimeException('Unable to remove theme directory: ' . basename($path));
+            throw new RuntimeException('Unable to remove directory: ' . basename($path));
         }
     }
 
@@ -1538,7 +2056,7 @@ final class AdminController
             '/forms/submissions' => 'forms.read',
             '/cache/clear', '/backup/create' => 'ops.manage',
             '/plugins', '/plugin-registry', '/plugin-page' => 'plugins.read',
-            '/plugins/toggle', '/plugins/install' => 'plugins.manage',
+            '/plugins/toggle', '/plugins/install', '/plugins/update', '/plugins/update-all', '/plugins/uninstall' => 'plugins.manage',
             '/themes', '/theme-registry' => 'themes.read',
             '/themes/install', '/themes/activate', '/themes/uninstall' => 'themes.manage',
             '/marketplace/orders', '/marketplace/license/verify' => 'marketplace.read',
