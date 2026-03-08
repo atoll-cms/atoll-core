@@ -147,6 +147,7 @@ final class AdminController
             $endpoint === '/media/list' && $request->method === 'GET' => $this->listMedia($request),
             $endpoint === '/media/transform' && $request->method === 'POST' => $this->transformMedia($request),
             $endpoint === '/security/audit' && $request->method === 'GET' => $this->securityAudit($request),
+            $endpoint === '/security/mixed-content/scan' && $request->method === 'GET' => $this->securityMixedContentScan($request),
             $endpoint === '/security/2fa/setup' && $request->method === 'POST' => $this->setupTwoFactor($request),
             $endpoint === '/security/2fa/disable' && $request->method === 'POST' => $this->disableTwoFactor($request),
             $endpoint === '/settings' && $request->method === 'GET' => $this->settings(),
@@ -998,6 +999,81 @@ final class AdminController
         ]);
     }
 
+    private function securityMixedContentScan(Request $request): Response
+    {
+        $limit = (int) $request->input('limit', 200);
+        $limit = max(1, min(1000, $limit));
+        $findings = [];
+        $scannedFiles = 0;
+
+        $roots = [
+            $this->root . '/config.yaml',
+            $this->root . '/content',
+            $this->root . '/templates',
+            $this->root . '/themes',
+            $this->root . '/plugins',
+        ];
+        $extensions = ['yaml', 'yml', 'md', 'twig', 'php', 'css', 'js', 'json', 'html', 'txt', 'xml'];
+
+        foreach ($roots as $root) {
+            if (count($findings) >= $limit) {
+                break;
+            }
+
+            if (is_file($root)) {
+                $scannedFiles += $this->scanFileForMixedContent($root, $findings, $limit);
+                continue;
+            }
+
+            if (!is_dir($root)) {
+                continue;
+            }
+
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS)
+            );
+
+            /** @var \SplFileInfo $file */
+            foreach ($iterator as $file) {
+                if (count($findings) >= $limit) {
+                    break;
+                }
+                if (!$file->isFile()) {
+                    continue;
+                }
+
+                $path = str_replace('\\', '/', $file->getPathname());
+                if (
+                    str_contains($path, '/node_modules/')
+                    || str_contains($path, '/vendor/')
+                    || str_contains($path, '/cache/')
+                    || str_contains($path, '/backups/')
+                ) {
+                    continue;
+                }
+
+                $ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+                if ($ext === '' || !in_array($ext, $extensions, true)) {
+                    continue;
+                }
+
+                $size = $file->getSize();
+                if (is_int($size) && $size > 1024 * 512) {
+                    continue;
+                }
+
+                $scannedFiles += $this->scanFileForMixedContent($path, $findings, $limit);
+            }
+        }
+
+        return Response::json([
+            'ok' => true,
+            'scanned_files' => $scannedFiles,
+            'count' => count($findings),
+            'findings' => $findings,
+        ]);
+    }
+
     private function setupTwoFactor(Request $request): Response
     {
         $currentUser = $this->security->currentUser();
@@ -1206,6 +1282,41 @@ final class AdminController
             'value' => $value,
             'text' => $text,
         ];
+    }
+
+    /**
+     * @param array<int, array{file:string,line:int,urls:array<int,string>,snippet:string}> $findings
+     */
+    private function scanFileForMixedContent(string $path, array &$findings, int $limit): int
+    {
+        $lines = @file($path, FILE_IGNORE_NEW_LINES);
+        if (!is_array($lines)) {
+            return 0;
+        }
+
+        $relative = str_starts_with($path, $this->root . '/')
+            ? substr($path, strlen($this->root) + 1)
+            : $path;
+
+        foreach ($lines as $index => $line) {
+            if (count($findings) >= $limit) {
+                break;
+            }
+
+            $urls = $this->security->mixedContentFindings((string) $line);
+            if ($urls === []) {
+                continue;
+            }
+
+            $findings[] = [
+                'file' => str_replace('\\', '/', (string) $relative),
+                'line' => $index + 1,
+                'urls' => $urls,
+                'snippet' => trim((string) $line),
+            ];
+        }
+
+        return 1;
     }
 
     private function resolveAdminFile(string $relative): string
