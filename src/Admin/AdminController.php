@@ -169,6 +169,8 @@ final class AdminController
             $endpoint === '/themes/uninstall' && $request->method === 'POST' => $this->uninstallTheme($request),
             $endpoint === '/media/upload' && $request->method === 'POST' => $this->uploadMedia($request),
             $endpoint === '/media/list' && $request->method === 'GET' => $this->listMedia($request),
+            $endpoint === '/media/meta' && $request->method === 'GET' => $this->mediaMeta($request),
+            $endpoint === '/media/meta/save' && $request->method === 'POST' => $this->saveMediaMeta($request),
             $endpoint === '/media/transform' && $request->method === 'POST' => $this->transformMedia($request),
             $endpoint === '/security/audit' && $request->method === 'GET' => $this->securityAudit($request),
             $endpoint === '/security/mixed-content/scan' && $request->method === 'GET' => $this->securityMixedContentScan($request),
@@ -1017,6 +1019,42 @@ final class AdminController
     {
         $limit = (int) $request->input('limit', 200);
         return Response::json($this->media->list($limit));
+    }
+
+    private function mediaMeta(Request $request): Response
+    {
+        $file = trim((string) $request->input('file', ''));
+        if ($file === '') {
+            return Response::json(['error' => 'Missing file'], 422);
+        }
+
+        $result = $this->media->meta($file);
+        $status = (bool) ($result['ok'] ?? false) ? 200 : 422;
+        return Response::json($result, $status);
+    }
+
+    private function saveMediaMeta(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $file = trim((string) ($payload['file'] ?? ''));
+        $meta = $payload['meta'] ?? [];
+        if ($file === '') {
+            return Response::json(['error' => 'Missing file'], 422);
+        }
+        if (!is_array($meta)) {
+            return Response::json(['error' => 'meta must be object'], 422);
+        }
+
+        $result = $this->media->saveMeta($file, $meta);
+        $status = (bool) ($result['ok'] ?? false) ? 200 : 422;
+        if ($status === 200) {
+            $this->security->recordAudit('media.meta_save', [
+                'user' => $this->security->currentUser(),
+                'file' => $file,
+            ]);
+        }
+
+        return Response::json($result, $status);
     }
 
     private function transformMedia(Request $request): Response
@@ -2662,8 +2700,8 @@ final class AdminController
             '/themes/install', '/themes/activate', '/themes/uninstall' => 'themes.manage',
             '/marketplace/orders', '/marketplace/license/verify' => 'marketplace.read',
             '/marketplace/purchase' => 'marketplace.write',
-            '/media/list' => 'media.read',
-            '/media/upload', '/media/transform' => 'media.write',
+            '/media/list', '/media/meta' => 'media.read',
+            '/media/upload', '/media/transform', '/media/meta/save' => 'media.write',
             '/security/audit', '/security/mixed-content/scan' => 'security.read',
             '/security/2fa/setup', '/security/2fa/disable' => 'security.self',
             '/settings' => 'settings.read',
