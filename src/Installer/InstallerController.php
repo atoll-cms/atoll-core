@@ -116,6 +116,10 @@ final class InstallerController
                     'driver' => 'sqlite',
                     'path' => 'cache/content-index.sqlite',
                 ],
+                'revisions' => [
+                    'enabled' => true,
+                    'max_per_entry' => 20,
+                ],
             ],
             'backup' => [
                 'targets' => [

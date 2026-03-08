@@ -138,7 +138,10 @@ final class AdminController
             $endpoint === '/collection/meta/save' && $request->method === 'POST' => $this->saveCollectionMeta($request),
             $endpoint === '/entries' && $request->method === 'GET' => $this->entries($request),
             $endpoint === '/entry' && $request->method === 'GET' => $this->entry($request),
+            $endpoint === '/entry/revisions' && $request->method === 'GET' => $this->entryRevisions($request),
+            $endpoint === '/entry/revision' && $request->method === 'GET' => $this->entryRevision($request),
             $endpoint === '/entry/save' && $request->method === 'POST' => $this->saveEntry($request),
+            $endpoint === '/entry/revision/restore' && $request->method === 'POST' => $this->restoreEntryRevision($request),
             $endpoint === '/entry/delete' && $request->method === 'POST' => $this->deleteEntry($request),
             $endpoint === '/forms/submissions' && $request->method === 'GET' => $this->formSubmissions($request),
             $endpoint === '/cache/clear' && $request->method === 'POST' => $this->clearCache(),
@@ -309,6 +312,52 @@ final class AdminController
         return Response::json(['ok' => true, 'entry' => $entry->toArray()]);
     }
 
+    private function entryRevisions(Request $request): Response
+    {
+        $collection = trim((string) $request->input('collection', 'pages'));
+        $id = trim((string) $request->input('id', 'index'));
+        $limit = max(1, min(200, (int) $request->input('limit', 20)));
+
+        if ($collection === '' || $id === '') {
+            return Response::json(['error' => 'Missing collection or id'], 422);
+        }
+
+        return Response::json([
+            'ok' => true,
+            'revisions' => $this->content->listRevisions($collection, $id, $limit),
+        ]);
+    }
+
+    private function entryRevision(Request $request): Response
+    {
+        $collection = trim((string) $request->input('collection', 'pages'));
+        $id = trim((string) $request->input('id', 'index'));
+        $revisionId = trim((string) $request->input('revision', ''));
+        if ($collection === '' || $id === '' || $revisionId === '') {
+            return Response::json(['error' => 'Missing collection, id or revision'], 422);
+        }
+
+        $revision = $this->content->getRevision($collection, $id, $revisionId);
+        if ($revision === null) {
+            return Response::json(['error' => 'Revision not found'], 404);
+        }
+
+        $current = $this->content->getById($collection, $id);
+
+        return Response::json([
+            'ok' => true,
+            'revision' => $revision,
+            'current' => $current === null ? null : [
+                'id' => $current->id,
+                'collection' => $current->collection,
+                'slug' => $current->slug,
+                'url' => $current->url,
+                'frontmatter' => $current->data,
+                'markdown' => $current->markdown,
+            ],
+        ]);
+    }
+
     private function saveEntry(Request $request): Response
     {
         $payload = $request->isJson() ? $request->json() : $request->post;
@@ -368,7 +417,8 @@ final class AdminController
                 (string) $savePayload['collection'],
                 (string) $savePayload['id'],
                 (array) $savePayload['frontmatter'],
-                (string) $savePayload['markdown']
+                (string) $savePayload['markdown'],
+                (string) $savePayload['user']
             );
         } catch (ValidationException $e) {
             return Response::json([
@@ -377,6 +427,33 @@ final class AdminController
             ], 422);
         }
         $this->cache->invalidateByDependencies([$file]);
+
+        return Response::json(['ok' => true, 'file' => $file]);
+    }
+
+    private function restoreEntryRevision(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $collection = trim((string) ($payload['collection'] ?? 'pages'));
+        $id = trim((string) ($payload['id'] ?? 'index'));
+        $revisionId = trim((string) ($payload['revision'] ?? ''));
+        if ($collection === '' || $id === '' || $revisionId === '') {
+            return Response::json(['error' => 'Missing collection, id or revision'], 422);
+        }
+
+        $file = $this->content->restoreRevision($collection, $id, $revisionId, $this->security->currentUser());
+        if ($file === null) {
+            return Response::json(['error' => 'Revision not found'], 404);
+        }
+
+        $this->cache->invalidateByDependencies([$file]);
+        $this->security->recordAudit('content.revision_restore', [
+            'user' => $this->security->currentUser(),
+            'collection' => $collection,
+            'id' => $id,
+            'revision' => $revisionId,
+            'file' => $file,
+        ]);
 
         return Response::json(['ok' => true, 'file' => $file]);
     }
@@ -1455,8 +1532,8 @@ final class AdminController
         $method = strtoupper(trim($method));
         return match ($endpoint) {
             '/me', '/menu', '/dashboard/widgets' => 'dashboard.read',
-            '/collections', '/collection/meta', '/entries', '/entry' => 'content.read',
-            '/entry/save', '/collection/meta/save' => 'content.write',
+            '/collections', '/collection/meta', '/entries', '/entry', '/entry/revisions', '/entry/revision' => 'content.read',
+            '/entry/save', '/collection/meta/save', '/entry/revision/restore' => 'content.write',
             '/entry/delete' => 'content.delete',
             '/forms/submissions' => 'forms.read',
             '/cache/clear', '/backup/create' => 'ops.manage',
