@@ -145,6 +145,8 @@ final class AdminController
             $endpoint === '/entry/revision/restore' && $request->method === 'POST' => $this->restoreEntryRevision($request),
             $endpoint === '/entry/delete' && $request->method === 'POST' => $this->deleteEntry($request),
             $endpoint === '/forms/submissions' && $request->method === 'GET' => $this->formSubmissions($request),
+            $endpoint === '/forms/submissions/status' && $request->method === 'POST' => $this->updateFormSubmissionStatus($request),
+            $endpoint === '/forms/submissions/export' && $request->method === 'GET' => $this->exportFormSubmissions($request),
             $endpoint === '/redirects' && $request->method === 'GET' => $this->redirects(),
             $endpoint === '/redirects/save' && $request->method === 'POST' => $this->saveRedirects($request),
             $endpoint === '/cache/clear' && $request->method === 'POST' => $this->clearCache(),
@@ -542,21 +544,347 @@ final class AdminController
 
     private function formSubmissions(Request $request): Response
     {
-        $name = (string) $request->input('name', 'contact');
-        $file = $this->root . '/content/forms-submissions/' . $name . '.jsonl';
-        if (!is_file($file)) {
-            return Response::json(['ok' => true, 'submissions' => []]);
+        $filter = $this->formSubmissionFilterFromRequest($request);
+        $allForms = $this->formSubmissionNames();
+        $rows = $this->loadFilteredSubmissions($filter);
+
+        return Response::json([
+            'ok' => true,
+            'forms' => $allForms,
+            'filter' => $filter,
+            'submissions' => $rows,
+            'count' => count($rows),
+        ]);
+    }
+
+    private function updateFormSubmissionStatus(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $form = trim((string) ($payload['form'] ?? ''));
+        $id = trim((string) ($payload['id'] ?? ''));
+        $status = $this->normalizeSubmissionStatus((string) ($payload['status'] ?? ''));
+        if ($form === '' || $id === '') {
+            return Response::json(['error' => 'Missing form or id'], 422);
+        }
+        if ($status === '') {
+            return Response::json(['error' => 'Invalid status'], 422);
         }
 
+        $rows = $this->loadFormSubmissions($form);
+        $exists = false;
+        foreach ($rows as $row) {
+            if ((string) ($row['id'] ?? '') === $id) {
+                $exists = true;
+                break;
+            }
+        }
+        if (!$exists) {
+            return Response::json(['error' => 'Submission not found'], 404);
+        }
+
+        $statusMap = $this->loadSubmissionStatusMap($form);
+        $statusMap[$id] = $status;
+        $this->writeSubmissionStatusMap($form, $statusMap);
+
+        $this->security->recordAudit('forms.submission_status', [
+            'user' => $this->security->currentUser(),
+            'form' => $form,
+            'id' => $id,
+            'status' => $status,
+        ]);
+
+        return Response::json([
+            'ok' => true,
+            'form' => $form,
+            'id' => $id,
+            'status' => $status,
+        ]);
+    }
+
+    private function exportFormSubmissions(Request $request): Response
+    {
+        $filter = $this->formSubmissionFilterFromRequest($request);
+        $rows = $this->loadFilteredSubmissions($filter);
+        $csv = fopen('php://temp', 'r+');
+        if ($csv === false) {
+            return Response::json(['error' => 'Could not create export buffer'], 500);
+        }
+
+        $payloadKeys = [];
+        foreach ($rows as $row) {
+            $payload = $row['payload'] ?? [];
+            if (!is_array($payload)) {
+                continue;
+            }
+            foreach (array_keys($payload) as $key) {
+                if (is_string($key) && trim($key) !== '') {
+                    $payloadKeys[$key] = true;
+                }
+            }
+        }
+        $payloadColumns = array_keys($payloadKeys);
+        sort($payloadColumns);
+
+        $headers = ['form', 'id', 'timestamp', 'status', 'ip', ...$payloadColumns];
+        fputcsv($csv, $headers, ',', '"', '\\');
+
+        foreach ($rows as $row) {
+            $payload = is_array($row['payload'] ?? null) ? $row['payload'] : [];
+            $record = [
+                (string) ($row['form'] ?? ''),
+                (string) ($row['id'] ?? ''),
+                (string) ($row['timestamp'] ?? ''),
+                (string) ($row['status'] ?? ''),
+                (string) ($row['ip'] ?? ''),
+            ];
+            foreach ($payloadColumns as $column) {
+                $value = $payload[$column] ?? '';
+                if (is_array($value) || is_object($value)) {
+                    $value = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                }
+                $record[] = (string) $value;
+            }
+            fputcsv($csv, $record, ',', '"', '\\');
+        }
+
+        rewind($csv);
+        $content = (string) stream_get_contents($csv);
+        fclose($csv);
+
+        $suffix = $filter['form'] === 'all' ? 'all' : $filter['form'];
+        $filename = 'submissions-' . $suffix . '-' . date('Ymd-His') . '.csv';
+
+        return Response::text($content)
+            ->withHeader('Content-Type', 'text/csv; charset=UTF-8')
+            ->withHeader('Content-Disposition', 'attachment; filename="' . $filename . '"');
+    }
+
+    /**
+     * @return array{form:string,status:string,q:string,date_from:string,date_to:string,limit:int}
+     */
+    private function formSubmissionFilterFromRequest(Request $request): array
+    {
+        $form = trim((string) $request->input('name', 'all'));
+        if ($form === '') {
+            $form = 'all';
+        }
+
+        $status = strtolower(trim((string) $request->input('status', 'all')));
+        if (!in_array($status, ['all', 'new', 'in-progress', 'done'], true)) {
+            $status = 'all';
+        }
+
+        $q = trim((string) $request->input('q', ''));
+        $dateFrom = trim((string) $request->input('date_from', ''));
+        $dateTo = trim((string) $request->input('date_to', ''));
+        $limit = (int) $request->input('limit', 500);
+        $limit = max(1, min(5000, $limit));
+
+        return [
+            'form' => $form,
+            'status' => $status,
+            'q' => $q,
+            'date_from' => $dateFrom,
+            'date_to' => $dateTo,
+            'limit' => $limit,
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function formSubmissionNames(): array
+    {
         $rows = [];
-        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
-            $decoded = json_decode($line, true);
-            if (is_array($decoded)) {
-                $rows[] = $decoded;
+        $submissionDir = $this->root . '/content/forms-submissions';
+        foreach (glob($submissionDir . '/*.jsonl') ?: [] as $file) {
+            $name = pathinfo($file, PATHINFO_FILENAME);
+            if ($name !== '') {
+                $rows[] = $name;
             }
         }
 
-        return Response::json(['ok' => true, 'submissions' => array_reverse($rows)]);
+        $formsDir = $this->root . '/content/forms';
+        foreach (glob($formsDir . '/*.yaml') ?: [] as $file) {
+            $name = pathinfo($file, PATHINFO_FILENAME);
+            if ($name !== '') {
+                $rows[] = $name;
+            }
+        }
+        foreach (glob($formsDir . '/*.yml') ?: [] as $file) {
+            $name = pathinfo($file, PATHINFO_FILENAME);
+            if ($name !== '') {
+                $rows[] = $name;
+            }
+        }
+
+        $rows = array_values(array_unique($rows));
+        sort($rows);
+
+        return $rows;
+    }
+
+    /**
+     * @param array{form:string,status:string,q:string,date_from:string,date_to:string,limit:int} $filter
+     * @return array<int, array<string, mixed>>
+     */
+    private function loadFilteredSubmissions(array $filter): array
+    {
+        $form = $filter['form'];
+        $forms = $form === 'all' ? $this->formSubmissionNames() : [$form];
+        $rows = [];
+        foreach ($forms as $name) {
+            foreach ($this->loadFormSubmissions($name) as $row) {
+                $rows[] = $row;
+            }
+        }
+
+        $statusFilter = $filter['status'];
+        $query = mb_strtolower($filter['q']);
+        $dateFromTs = $this->parseDateStart($filter['date_from']);
+        $dateToTs = $this->parseDateEnd($filter['date_to']);
+
+        $rows = array_values(array_filter($rows, static function (array $row) use ($statusFilter, $query, $dateFromTs, $dateToTs): bool {
+            if ($statusFilter !== 'all' && (string) ($row['status'] ?? 'new') !== $statusFilter) {
+                return false;
+            }
+
+            $timestamp = strtotime((string) ($row['timestamp'] ?? ''));
+            if ($dateFromTs !== null && ($timestamp === false || $timestamp < $dateFromTs)) {
+                return false;
+            }
+            if ($dateToTs !== null && ($timestamp === false || $timestamp > $dateToTs)) {
+                return false;
+            }
+
+            if ($query !== '') {
+                $haystack = mb_strtolower((string) ($row['id'] ?? '') . "\n" . (string) ($row['form'] ?? '') . "\n" . json_encode($row['payload'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+                if (!str_contains($haystack, $query)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }));
+
+        usort($rows, static function (array $a, array $b): int {
+            return strcmp((string) ($b['timestamp'] ?? ''), (string) ($a['timestamp'] ?? ''));
+        });
+
+        return array_slice($rows, 0, $filter['limit']);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function loadFormSubmissions(string $form): array
+    {
+        $file = $this->root . '/content/forms-submissions/' . $form . '.jsonl';
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $statusMap = $this->loadSubmissionStatusMap($form);
+        $rows = [];
+        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        foreach ($lines as $index => $line) {
+            $decoded = json_decode($line, true);
+            if (!is_array($decoded)) {
+                continue;
+            }
+
+            $id = trim((string) ($decoded['id'] ?? ''));
+            if ($id === '') {
+                $seed = (string) ($decoded['timestamp'] ?? '') . '|' . json_encode($decoded['payload'] ?? [], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                $id = substr(sha1($form . '|' . $index . '|' . $seed), 0, 16);
+            }
+
+            $status = $this->normalizeSubmissionStatus((string) ($statusMap[$id] ?? ($decoded['status'] ?? 'new')));
+            if ($status === '') {
+                $status = 'new';
+            }
+
+            $rows[] = [
+                'id' => $id,
+                'form' => $form,
+                'timestamp' => (string) ($decoded['timestamp'] ?? ''),
+                'ip' => (string) ($decoded['ip'] ?? ''),
+                'status' => $status,
+                'payload' => is_array($decoded['payload'] ?? null) ? $decoded['payload'] : [],
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function loadSubmissionStatusMap(string $form): array
+    {
+        $file = $this->root . '/content/forms-submissions/' . $form . '.status.yaml';
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $parsed = Yaml::parse((string) file_get_contents($file));
+        if (!is_array($parsed)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($parsed as $id => $status) {
+            if (!is_string($id)) {
+                continue;
+            }
+            $normalized = $this->normalizeSubmissionStatus((string) $status);
+            if ($normalized === '') {
+                continue;
+            }
+            $rows[$id] = $normalized;
+        }
+
+        ksort($rows);
+        return $rows;
+    }
+
+    /**
+     * @param array<string, string> $map
+     */
+    private function writeSubmissionStatusMap(string $form, array $map): void
+    {
+        $file = $this->root . '/content/forms-submissions/' . $form . '.status.yaml';
+        if (!is_dir(dirname($file))) {
+            mkdir(dirname($file), 0775, true);
+        }
+        ksort($map);
+        file_put_contents($file, Yaml::dump($map));
+    }
+
+    private function normalizeSubmissionStatus(string $status): string
+    {
+        $status = strtolower(trim($status));
+        return in_array($status, ['new', 'in-progress', 'done'], true) ? $status : '';
+    }
+
+    private function parseDateStart(string $value): ?int
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+        $ts = strtotime($value . ' 00:00:00');
+        return $ts === false ? null : $ts;
+    }
+
+    private function parseDateEnd(string $value): ?int
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+        $ts = strtotime($value . ' 23:59:59');
+        return $ts === false ? null : $ts;
     }
 
     private function redirects(): Response
@@ -2323,7 +2651,8 @@ final class AdminController
             '/collections', '/collection/meta', '/entries', '/entry', '/entry/revisions', '/entry/revision' => 'content.read',
             '/entry/save', '/collection/meta/save', '/entry/revision/restore' => 'content.write',
             '/entry/delete' => 'content.delete',
-            '/forms/submissions' => 'forms.read',
+            '/forms/submissions', '/forms/submissions/export' => 'forms.read',
+            '/forms/submissions/status' => 'forms.write',
             '/redirects' => 'redirects.read',
             '/redirects/save' => 'redirects.write',
             '/cache/clear', '/backup/create' => 'ops.manage',
