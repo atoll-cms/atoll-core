@@ -482,7 +482,7 @@ final class ContentRepository
         }
 
         $filename = pathinfo($path, PATHINFO_FILENAME);
-        $slug = $this->slugFromFilename($collection, $filename);
+        $slug = $this->slugFromFilename($collection, $filename, $frontmatter);
 
         $url = $forcedUrl;
         if ($url === null) {
@@ -632,8 +632,20 @@ final class ContentRepository
         return [is_array($frontmatter) ? $frontmatter : [], $matches[2]];
     }
 
-    private function slugFromFilename(string $collection, string $filename): string
+    /**
+     * @param array<string, mixed> $frontmatter
+     */
+    private function slugFromFilename(string $collection, string $filename, array $frontmatter = []): string
     {
+        $explicitSlug = trim((string) ($frontmatter['slug'] ?? ''));
+        if ($explicitSlug !== '') {
+            $normalized = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', $explicitSlug));
+            $normalized = trim($normalized, '-');
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
         $meta = $this->collectionMeta($collection);
         $slugSource = (string) ($meta['slug_from'] ?? 'filename');
         if ($slugSource !== 'filename') {

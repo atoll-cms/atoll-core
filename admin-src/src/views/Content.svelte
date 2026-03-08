@@ -4,6 +4,7 @@
 
   let saving = $state(false);
   let editorTitle = $state('');
+  let editorSlug = $state('');
   let editorFrontmatter = $state('');
   let editorMarkdown = $state('');
   let previewHtml = $state('');
@@ -39,6 +40,7 @@
       delete fm.content;
       delete fm.markdown;
       editorFrontmatter = JSON.stringify(fm, null, 2);
+      editorSlug = String(fm.slug || $currentEntry.slug || '').trim();
       editorMarkdown = $currentEntry.markdown || '';
       previewHtml = $currentEntry.content || '';
     }
@@ -354,9 +356,14 @@
     if (editorTitle.trim() !== '') {
       frontmatter.title = editorTitle.trim();
     }
+    if (editorSlug.trim() !== '') {
+      frontmatter.slug = editorSlug.trim();
+    } else if (Object.prototype.hasOwnProperty.call(frontmatter, 'slug')) {
+      delete frontmatter.slug;
+    }
 
     try {
-      await api('/admin/api/entry/save', {
+      const saveResult = await api('/admin/api/entry/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -368,6 +375,11 @@
       });
 
       addToast('Eintrag gespeichert.', 'success');
+      if (saveResult?.auto_redirect?.created) {
+        addToast(`Auto-Redirect: ${saveResult.auto_redirect.from} -> ${saveResult.auto_redirect.to}`, 'info');
+      } else if (saveResult?.auto_redirect?.reason === 'conflict') {
+        addToast('Slug geaendert, aber Redirect-Konflikt erkannt. Bitte unter Redirects pruefen.', 'error');
+      }
       await loadEntries();
       await loadCollectionMeta();
       await selectEntry($currentEntryId);
@@ -595,12 +607,20 @@
       {#if $currentEntry}
         <form onsubmit={saveEntry}>
           <div class="editor-toolbar">
-            <input
-              type="text"
-              class="title-input"
-              bind:value={editorTitle}
-              placeholder="Titel"
-            >
+            <div class="title-group">
+              <input
+                type="text"
+                class="title-input"
+                bind:value={editorTitle}
+                placeholder="Titel"
+              >
+              <input
+                type="text"
+                class="slug-input"
+                bind:value={editorSlug}
+                placeholder="slug (z. B. hallo-welt)"
+              >
+            </div>
             <div class="toolbar-actions">
               <button
                 type="button"
@@ -971,8 +991,15 @@
     flex-shrink: 0;
   }
 
-  .title-input {
+  .title-group {
     flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .title-input {
+    width: 100%;
     padding: 0.4rem 0;
     background: transparent;
     border: none;
@@ -984,6 +1011,22 @@
 
   .title-input:focus {
     outline: none;
+  }
+
+  .slug-input {
+    width: 100%;
+    padding: 0.2rem 0;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .slug-input:focus {
+    outline: none;
+    color: var(--text);
   }
 
   .toolbar-actions {

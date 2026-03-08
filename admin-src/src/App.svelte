@@ -11,6 +11,7 @@
   import Content from './views/Content.svelte';
   import Media from './views/Media.svelte';
   import Forms from './views/Forms.svelte';
+  import Redirects from './views/Redirects.svelte';
   import Seo from './views/Seo.svelte';
   import Plugins from './views/Plugins.svelte';
   import Themes from './views/Themes.svelte';
@@ -112,6 +113,8 @@
         <Media />
       {:else if $currentView === 'forms'}
         <Forms />
+      {:else if $currentView === 'redirects'}
+        <Redirects />
       {:else if $currentView === 'seo'}
         <Seo />
       {:else if $currentView === 'plugins'}

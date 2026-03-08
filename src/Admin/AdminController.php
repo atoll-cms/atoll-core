@@ -7,6 +7,7 @@ namespace Atoll\Admin;
 use Atoll\Backup\BackupManager;
 use Atoll\Cache\CacheManager;
 use Atoll\Content\ContentRepository;
+use Atoll\Content\Page;
 use Atoll\Content\ValidationException;
 use Atoll\Hooks\HookManager;
 use Atoll\Http\Request;
@@ -144,6 +145,8 @@ final class AdminController
             $endpoint === '/entry/revision/restore' && $request->method === 'POST' => $this->restoreEntryRevision($request),
             $endpoint === '/entry/delete' && $request->method === 'POST' => $this->deleteEntry($request),
             $endpoint === '/forms/submissions' && $request->method === 'GET' => $this->formSubmissions($request),
+            $endpoint === '/redirects' && $request->method === 'GET' => $this->redirects(),
+            $endpoint === '/redirects/save' && $request->method === 'POST' => $this->saveRedirects($request),
             $endpoint === '/cache/clear' && $request->method === 'POST' => $this->clearCache(),
             $endpoint === '/backup/create' && $request->method === 'POST' => $this->createBackup(),
             $endpoint === '/plugins' && $request->method === 'GET' => $this->pluginsList(),
@@ -366,6 +369,7 @@ final class AdminController
         $payload = $request->isJson() ? $request->json() : $request->post;
         $collection = (string) ($payload['collection'] ?? 'pages');
         $id = (string) ($payload['id'] ?? 'index');
+        $beforeEntry = $this->content->getById($collection, $id);
         $frontmatter = $payload['frontmatter'] ?? [];
         $markdown = (string) ($payload['markdown'] ?? '');
 
@@ -431,7 +435,14 @@ final class AdminController
         }
         $this->cache->invalidateByDependencies([$file]);
 
-        return Response::json(['ok' => true, 'file' => $file]);
+        $afterEntry = $this->content->getById($collection, $id);
+        $autoRedirect = $this->createAutoSlugRedirect($beforeEntry, $afterEntry);
+
+        return Response::json([
+            'ok' => true,
+            'file' => $file,
+            'auto_redirect' => $autoRedirect,
+        ]);
     }
 
     private function restoreEntryRevision(Request $request): Response
@@ -546,6 +557,41 @@ final class AdminController
         }
 
         return Response::json(['ok' => true, 'submissions' => array_reverse($rows)]);
+    }
+
+    private function redirects(): Response
+    {
+        return Response::json([
+            'ok' => true,
+            'redirects' => $this->loadRedirectRules(),
+        ]);
+    }
+
+    private function saveRedirects(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $incoming = $payload['redirects'] ?? [];
+        if (!is_array($incoming)) {
+            return Response::json(['error' => 'redirects must be a list'], 422);
+        }
+
+        try {
+            $rules = $this->normalizeRedirectRules($incoming);
+        } catch (RuntimeException $e) {
+            return Response::json(['error' => $e->getMessage()], 422);
+        }
+
+        $this->writeRedirectRules($rules);
+        $this->cache->clear();
+        $this->security->recordAudit('redirects.save', [
+            'user' => $this->security->currentUser(),
+            'count' => count($rules),
+        ]);
+
+        return Response::json([
+            'ok' => true,
+            'redirects' => $rules,
+        ]);
     }
 
     private function clearCache(): Response
@@ -1668,6 +1714,230 @@ final class AdminController
         ]));
     }
 
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function createAutoSlugRedirect(?Page $before, ?Page $after): ?array
+    {
+        if ($before === null || $after === null) {
+            return null;
+        }
+
+        $from = $this->normalizeRedirectPath($before->url);
+        $to = $this->normalizeRedirectPath($after->url);
+        if ($from === '' || $to === '' || $from === $to) {
+            return null;
+        }
+
+        $rules = $this->loadRedirectRules();
+        foreach ($rules as $rule) {
+            $existingFrom = $this->normalizeRedirectPath((string) ($rule['from'] ?? ''));
+            if ($existingFrom !== $from) {
+                continue;
+            }
+
+            $existingTo = $this->normalizeRedirectPath((string) ($rule['to'] ?? ''));
+            if ($existingTo === $to && (int) ($rule['status'] ?? 301) === 301) {
+                return [
+                    'created' => false,
+                    'from' => $from,
+                    'to' => $to,
+                    'status' => 301,
+                    'reason' => 'exists',
+                ];
+            }
+
+            return [
+                'created' => false,
+                'from' => $from,
+                'to' => $to,
+                'status' => 301,
+                'reason' => 'conflict',
+            ];
+        }
+
+        $rules[] = [
+            'id' => $this->createRedirectId($from, $to),
+            'from' => $from,
+            'to' => $to,
+            'status' => 301,
+            'auto' => true,
+        ];
+
+        try {
+            $normalized = $this->normalizeRedirectRules($rules);
+            $this->writeRedirectRules($normalized);
+            $this->cache->clear();
+            $this->security->recordAudit('redirect.auto_slug', [
+                'user' => $this->security->currentUser(),
+                'from' => $from,
+                'to' => $to,
+            ]);
+        } catch (RuntimeException) {
+            return [
+                'created' => false,
+                'from' => $from,
+                'to' => $to,
+                'status' => 301,
+                'reason' => 'invalid',
+            ];
+        }
+
+        return [
+            'created' => true,
+            'from' => $from,
+            'to' => $to,
+            'status' => 301,
+            'reason' => 'slug_changed',
+        ];
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function loadRedirectRules(): array
+    {
+        $file = $this->root . '/content/data/redirects.yaml';
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $parsed = Yaml::parse((string) file_get_contents($file));
+        if (!is_array($parsed)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($parsed as $rule) {
+            if (is_array($rule)) {
+                $rows[] = $rule;
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rules
+     */
+    private function writeRedirectRules(array $rules): void
+    {
+        $file = $this->root . '/content/data/redirects.yaml';
+        if (!is_dir(dirname($file))) {
+            mkdir(dirname($file), 0775, true);
+        }
+        file_put_contents($file, Yaml::dump(array_values($rules)));
+    }
+
+    /**
+     * @param array<int, mixed> $incoming
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeRedirectRules(array $incoming): array
+    {
+        $normalized = [];
+        $fromSeen = [];
+
+        foreach ($incoming as $index => $raw) {
+            if (!is_array($raw)) {
+                throw new RuntimeException('Redirect entry #' . ($index + 1) . ' must be an object.');
+            }
+            $rule = $this->normalizeRedirectRule($raw, $index);
+            if ($rule === null) {
+                continue;
+            }
+
+            $from = (string) $rule['from'];
+            $to = (string) $rule['to'];
+            if (isset($fromSeen[$from])) {
+                throw new RuntimeException("Duplicate redirect source '{$from}'.");
+            }
+            if ($from === $to) {
+                throw new RuntimeException("Redirect loop detected for '{$from}'.");
+            }
+            if (!str_contains($from, '*') && !str_contains($to, '*') && isset($fromSeen[$to])) {
+                $otherTo = (string) ($fromSeen[$to]['to'] ?? '');
+                if ($otherTo === $from) {
+                    throw new RuntimeException("Redirect loop between '{$from}' and '{$to}'.");
+                }
+            }
+
+            $fromSeen[$from] = $rule;
+            $normalized[] = $rule;
+        }
+
+        return array_values($normalized);
+    }
+
+    /**
+     * @param array<string, mixed> $raw
+     * @return array<string, mixed>|null
+     */
+    private function normalizeRedirectRule(array $raw, int $index): ?array
+    {
+        $from = $this->normalizeRedirectPath((string) ($raw['from'] ?? ''));
+        $to = $this->normalizeRedirectPath((string) ($raw['to'] ?? ''));
+
+        if ($from === '' && $to === '') {
+            return null;
+        }
+        if ($from === '' || $to === '') {
+            throw new RuntimeException('Redirect entry #' . ($index + 1) . ' requires both from and to.');
+        }
+        if (str_contains($to, '*')) {
+            throw new RuntimeException("Redirect target '{$to}' must not contain wildcard '*'.");
+        }
+        if (str_contains($to, '$1') && !str_contains($from, '*')) {
+            throw new RuntimeException("Redirect '{$from}' uses \$1 without wildcard source.");
+        }
+
+        $status = (int) ($raw['status'] ?? 301);
+        if (!in_array($status, [301, 302], true)) {
+            throw new RuntimeException("Redirect '{$from}' has invalid status {$status}.");
+        }
+
+        return [
+            'id' => trim((string) ($raw['id'] ?? '')) !== ''
+                ? trim((string) $raw['id'])
+                : $this->createRedirectId($from, $to),
+            'from' => $from,
+            'to' => $to,
+            'status' => $status,
+            'auto' => (bool) ($raw['auto'] ?? false),
+        ];
+    }
+
+    private function normalizeRedirectPath(string $path): string
+    {
+        $path = trim($path);
+        if ($path === '') {
+            return '';
+        }
+
+        if (preg_match('#^https?://#i', $path) === 1) {
+            $parsed = parse_url($path, PHP_URL_PATH);
+            $path = is_string($parsed) ? $parsed : '/';
+        }
+
+        if (!str_starts_with($path, '/')) {
+            $path = '/' . ltrim($path, '/');
+        }
+
+        if (strlen($path) > 1) {
+            $path = rtrim($path, '/');
+        }
+
+        return $path === '' ? '/' : $path;
+    }
+
+    private function createRedirectId(string $from, string $to): string
+    {
+        $slug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', $from . '-' . $to));
+        $slug = trim($slug, '-');
+        $prefix = $slug !== '' ? substr($slug, 0, 32) : 'redirect';
+        return $prefix . '-' . substr(sha1($from . '|' . $to), 0, 8);
+    }
+
     private function resolveThemePreview(string $themeDir, string $themeId, string $source): ?string
     {
         $metaFile = rtrim($themeDir, '/') . '/theme.yaml';
@@ -2054,6 +2324,8 @@ final class AdminController
             '/entry/save', '/collection/meta/save', '/entry/revision/restore' => 'content.write',
             '/entry/delete' => 'content.delete',
             '/forms/submissions' => 'forms.read',
+            '/redirects' => 'redirects.read',
+            '/redirects/save' => 'redirects.write',
             '/cache/clear', '/backup/create' => 'ops.manage',
             '/plugins', '/plugin-registry', '/plugin-page' => 'plugins.read',
             '/plugins/toggle', '/plugins/install', '/plugins/update', '/plugins/update-all', '/plugins/uninstall' => 'plugins.manage',
