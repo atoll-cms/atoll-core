@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { settings, themes, addToast, confirm } from '../lib/stores.js';
   import { api } from '../lib/api.js';
 
@@ -46,6 +47,18 @@
   let backupSftpPassphrase = $state('');
   let backupSftpPath = $state('/backups/atoll');
   let saving = $state(false);
+  let savingUsers = $state(false);
+
+  let users = $state([]);
+  let usersLoaded = $state(false);
+  let newUserUsername = $state('');
+  let newUserPassword = $state('');
+  let newUserRole = $state('editor');
+  let newUserEnabled = $state(true);
+
+  onMount(async () => {
+    await loadUsers();
+  });
 
   $effect(() => {
     siteName = $settings?.name || '';
@@ -226,6 +239,79 @@
       addToast('Cache geleert.', 'success');
     } catch (err) {
       addToast(err.message, 'error');
+    }
+  }
+
+  async function loadUsers() {
+    try {
+      const result = await api('/admin/api/users');
+      users = Array.isArray(result.users) ? result.users : [];
+      usersLoaded = true;
+    } catch (err) {
+      usersLoaded = true;
+      addToast(err.message, 'error');
+    }
+  }
+
+  async function saveUsers() {
+    savingUsers = true;
+    try {
+      await api('/admin/api/users/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          users: users.map((u) => ({
+            username: u.username,
+            role: u.role,
+            enabled: !!u.enabled
+          }))
+        })
+      });
+      await loadUsers();
+      addToast('Benutzer gespeichert.', 'success');
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      savingUsers = false;
+    }
+  }
+
+  async function createUser(event) {
+    event.preventDefault();
+    if (!newUserUsername.trim() || !newUserPassword) {
+      addToast('Username und Passwort sind erforderlich.', 'error');
+      return;
+    }
+
+    savingUsers = true;
+    try {
+      await api('/admin/api/users/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          users: users.map((u) => ({
+            username: u.username,
+            role: u.role,
+            enabled: !!u.enabled
+          })),
+          create: {
+            username: newUserUsername.trim(),
+            password: newUserPassword,
+            role: newUserRole,
+            enabled: !!newUserEnabled
+          }
+        })
+      });
+      newUserUsername = '';
+      newUserPassword = '';
+      newUserRole = 'editor';
+      newUserEnabled = true;
+      await loadUsers();
+      addToast('Benutzer angelegt.', 'success');
+    } catch (err) {
+      addToast(err.message, 'error');
+    } finally {
+      savingUsers = false;
     }
   }
 
@@ -514,6 +600,95 @@
     </div>
   </form>
 
+  <div class="section-card">
+    <div class="section-header">
+      <h3>Benutzer & Rollen</h3>
+    </div>
+    <div class="form-body">
+      {#if usersLoaded}
+        <div class="users-table-wrap">
+          <table class="users-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Rolle</th>
+                <th>Aktiv</th>
+                <th>2FA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each users as row, idx}
+                <tr>
+                  <td><code>{row.username}</code></td>
+                  <td>
+                    <select
+                      value={row.role}
+                      oninput={(event) => {
+                        const value = event.currentTarget?.value || 'editor';
+                        users = users.map((item, i) => i === idx ? { ...item, role: value } : item);
+                      }}>
+                      <option value="owner">owner</option>
+                      <option value="editor">editor</option>
+                      <option value="support">support</option>
+                    </select>
+                  </td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={!!row.enabled}
+                      oninput={(event) => {
+                        const value = !!event.currentTarget?.checked;
+                        users = users.map((item, i) => i === idx ? { ...item, enabled: value } : item);
+                      }}>
+                  </td>
+                  <td>{row.twofa_enabled ? 'Ja' : 'Nein'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="users-actions">
+          <button class="save-btn" type="button" onclick={saveUsers} disabled={savingUsers}>
+            {savingUsers ? 'Speichert...' : 'Benutzer speichern'}
+          </button>
+        </div>
+
+        <form class="create-user-form" onsubmit={createUser}>
+          <h4>Neuen Benutzer anlegen</h4>
+          <div class="field-row">
+            <div class="field">
+              <label for="new-user-username">Username</label>
+              <input id="new-user-username" bind:value={newUserUsername} placeholder="editor-team">
+            </div>
+            <div class="field">
+              <label for="new-user-password">Passwort</label>
+              <input id="new-user-password" bind:value={newUserPassword} type="password" placeholder="Sicheres Passwort">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="new-user-role">Rolle</label>
+              <select id="new-user-role" bind:value={newUserRole}>
+                <option value="owner">owner</option>
+                <option value="editor">editor</option>
+                <option value="support">support</option>
+              </select>
+            </div>
+            <div class="field field--check field--new-user-enabled">
+              <label><input type="checkbox" bind:checked={newUserEnabled}> Aktiv</label>
+            </div>
+          </div>
+          <button type="submit" class="save-btn" disabled={savingUsers}>
+            {savingUsers ? 'Anlegen...' : 'Benutzer anlegen'}
+          </button>
+        </form>
+      {:else}
+        <p class="field-note">Benutzer werden geladen...</p>
+      {/if}
+    </div>
+  </div>
+
   <div class="actions-grid">
     <button class="action-card" onclick={createBackup}>
       <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -650,6 +825,53 @@
 
   .save-btn:hover:not(:disabled) { opacity: 0.9; }
   .save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .users-table-wrap {
+    overflow-x: auto;
+    margin-bottom: 0.8rem;
+  }
+
+  .users-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 520px;
+  }
+
+  .users-table th,
+  .users-table td {
+    text-align: left;
+    padding: 0.55rem 0.45rem;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.85rem;
+  }
+
+  .users-table th {
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .users-actions {
+    margin: 0.6rem 0 1rem;
+  }
+
+  .create-user-form {
+    border-top: 1px dashed var(--line);
+    padding-top: 0.9rem;
+  }
+
+  .create-user-form h4 {
+    margin: 0 0 0.75rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+
+  .field--new-user-enabled {
+    display: flex;
+    align-items: end;
+  }
 
   .actions-grid {
     display: grid;

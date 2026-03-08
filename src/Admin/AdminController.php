@@ -106,6 +106,17 @@ final class AdminController
             }
         }
 
+        $requiredPermission = $this->permissionForEndpoint($endpoint, $request->method);
+        if ($requiredPermission !== null && !$this->security->hasPermission($requiredPermission)) {
+            $this->security->recordAudit('auth.access_denied_permission', [
+                'user' => $this->security->currentUser(),
+                'endpoint' => $endpoint,
+                'method' => $request->method,
+                'required_permission' => $requiredPermission,
+            ]);
+            return Response::json(['error' => 'Forbidden'], 403);
+        }
+
         return match (true) {
             $endpoint === '/me' && $request->method === 'GET' => Response::json([
                 'ok' => true,
@@ -113,6 +124,8 @@ final class AdminController
                 'csrf' => $this->security->csrfToken(),
                 'security' => [
                     'twofa_enabled' => $this->isCurrentUserTwoFactorEnabled(),
+                    'role' => $this->security->currentUserRole(),
+                    'permissions' => $this->security->currentUserPermissions(),
                 ],
             ]),
             $endpoint === '/menu' && $request->method === 'GET' => $this->adminMenu(),
@@ -152,6 +165,8 @@ final class AdminController
             $endpoint === '/security/2fa/disable' && $request->method === 'POST' => $this->disableTwoFactor($request),
             $endpoint === '/settings' && $request->method === 'GET' => $this->settings(),
             $endpoint === '/settings/save' && $request->method === 'POST' => $this->saveSettings($request),
+            $endpoint === '/users' && $request->method === 'GET' => $this->users(),
+            $endpoint === '/users/save' && $request->method === 'POST' => $this->saveUsers($request),
             default => Response::json(['error' => 'Not found', 'endpoint' => $endpoint], 404),
         };
     }
@@ -187,9 +202,18 @@ final class AdminController
                 continue;
             }
 
+            if (array_key_exists('enabled', $user) && !(bool) $user['enabled']) {
+                $this->security->recordAudit('auth.login_denied_disabled', [
+                    'user' => $username,
+                    'ip' => $request->server['REMOTE_ADDR'] ?? 'unknown',
+                ]);
+                return Response::json(['error' => 'Account is disabled'], 403);
+            }
+
             $hash = (string) ($user['password_hash'] ?? '');
             if ($hash !== '' && password_verify($password, $hash)) {
                 $twoFactorSecret = (string) ($user['twofa_secret'] ?? '');
+                $role = $this->security->normalizeRole((string) ($user['role'] ?? 'owner'));
                 if ($twoFactorSecret !== '' && !$this->security->verifyTotp($twoFactorSecret, $otp)) {
                     $this->security->recordAudit('auth.login_failed_2fa', [
                         'user' => $username,
@@ -206,6 +230,8 @@ final class AdminController
                     'csrf' => $this->security->csrfToken(),
                     'security' => [
                         'twofa_enabled' => $twoFactorSecret !== '',
+                        'role' => $role,
+                        'permissions' => $this->security->currentUserPermissions(),
                     ],
                 ]);
             }
@@ -548,6 +574,146 @@ final class AdminController
         if ($currentTheme !== $previousTheme) {
             $this->cache->clear();
         }
+
+        return Response::json(['ok' => true]);
+    }
+
+    private function users(): Response
+    {
+        $users = Config::get($this->config, 'users', []);
+        if (!is_array($users)) {
+            return Response::json(['ok' => true, 'users' => []]);
+        }
+
+        $rows = [];
+        foreach ($users as $user) {
+            if (!is_array($user)) {
+                continue;
+            }
+
+            $username = trim((string) ($user['username'] ?? ''));
+            if ($username === '') {
+                continue;
+            }
+
+            $rows[] = [
+                'username' => $username,
+                'role' => $this->security->normalizeRole((string) ($user['role'] ?? 'owner')),
+                'enabled' => !array_key_exists('enabled', $user) || (bool) $user['enabled'],
+                'twofa_enabled' => is_string($user['twofa_secret'] ?? null) && (string) $user['twofa_secret'] !== '',
+            ];
+        }
+
+        usort($rows, static fn (array $a, array $b): int => strcmp((string) ($a['username'] ?? ''), (string) ($b['username'] ?? '')));
+        return Response::json(['ok' => true, 'users' => $rows]);
+    }
+
+    private function saveUsers(Request $request): Response
+    {
+        $payload = $request->isJson() ? $request->json() : $request->post;
+        $incomingUsers = $payload['users'] ?? [];
+        $create = $payload['create'] ?? null;
+        if (!is_array($incomingUsers)) {
+            return Response::json(['error' => 'users must be list'], 422);
+        }
+
+        $existing = Config::get($this->config, 'users', []);
+        if (!is_array($existing)) {
+            $existing = [];
+        }
+
+        $incomingByUsername = [];
+        foreach ($incomingUsers as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $username = trim((string) ($row['username'] ?? ''));
+            if ($username === '') {
+                continue;
+            }
+            $incomingByUsername[$username] = $row;
+        }
+
+        $nextUsers = [];
+        foreach ($existing as $user) {
+            if (!is_array($user)) {
+                continue;
+            }
+            $username = trim((string) ($user['username'] ?? ''));
+            if ($username === '') {
+                continue;
+            }
+
+            $incoming = $incomingByUsername[$username] ?? null;
+            if (is_array($incoming)) {
+                $user['role'] = $this->security->normalizeRole((string) ($incoming['role'] ?? ($user['role'] ?? 'owner')));
+                $user['enabled'] = (bool) ($incoming['enabled'] ?? (!array_key_exists('enabled', $user) || (bool) $user['enabled']));
+            } else {
+                $user['role'] = $this->security->normalizeRole((string) ($user['role'] ?? 'owner'));
+                $user['enabled'] = !array_key_exists('enabled', $user) || (bool) $user['enabled'];
+            }
+
+            $nextUsers[] = $user;
+        }
+
+        if (is_array($create)) {
+            $createUsername = trim((string) ($create['username'] ?? ''));
+            if ($createUsername !== '') {
+                if (preg_match('/^[a-zA-Z0-9._-]{3,32}$/', $createUsername) !== 1) {
+                    return Response::json(['error' => 'Username must be 3-32 chars (a-z, 0-9, . _ -).'], 422);
+                }
+
+                foreach ($nextUsers as $user) {
+                    if (!is_array($user)) {
+                        continue;
+                    }
+                    if ((string) ($user['username'] ?? '') === $createUsername) {
+                        return Response::json(['error' => 'User already exists.'], 422);
+                    }
+                }
+
+                $password = (string) ($create['password'] ?? '');
+                $passwordErrors = SecurityManager::passwordPolicyErrorsForConfig($password, $this->config);
+                if ($passwordErrors !== []) {
+                    return Response::json(['error' => implode(' ', $passwordErrors)], 422);
+                }
+
+                $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+                if (!is_string($passwordHash) || $passwordHash === '') {
+                    return Response::json(['error' => 'Could not hash password.'], 500);
+                }
+
+                $nextUsers[] = [
+                    'username' => $createUsername,
+                    'password_hash' => $passwordHash,
+                    'role' => $this->security->normalizeRole((string) ($create['role'] ?? 'editor')),
+                    'enabled' => (bool) ($create['enabled'] ?? true),
+                ];
+            }
+        }
+
+        $enabledOwners = 0;
+        foreach ($nextUsers as $user) {
+            if (!is_array($user)) {
+                continue;
+            }
+            $enabled = !array_key_exists('enabled', $user) || (bool) $user['enabled'];
+            $role = $this->security->normalizeRole((string) ($user['role'] ?? 'owner'));
+            if ($enabled && $role === 'owner') {
+                $enabledOwners++;
+            }
+        }
+        if ($enabledOwners < 1) {
+            return Response::json(['error' => 'At least one enabled owner is required.'], 422);
+        }
+
+        $this->config['users'] = $nextUsers;
+        Config::save($this->configPath, $this->config);
+
+        $this->security->recordAudit('auth.users_saved', [
+            'user' => $this->security->currentUser(),
+            'count' => count($nextUsers),
+        ]);
 
         return Response::json(['ok' => true]);
     }
@@ -1282,6 +1448,34 @@ final class AdminController
             'value' => $value,
             'text' => $text,
         ];
+    }
+
+    private function permissionForEndpoint(string $endpoint, string $method): ?string
+    {
+        $method = strtoupper(trim($method));
+        return match ($endpoint) {
+            '/me', '/menu', '/dashboard/widgets' => 'dashboard.read',
+            '/collections', '/collection/meta', '/entries', '/entry' => 'content.read',
+            '/entry/save', '/collection/meta/save' => 'content.write',
+            '/entry/delete' => 'content.delete',
+            '/forms/submissions' => 'forms.read',
+            '/cache/clear', '/backup/create' => 'ops.manage',
+            '/plugins', '/plugin-registry', '/plugin-page' => 'plugins.read',
+            '/plugins/toggle', '/plugins/install' => 'plugins.manage',
+            '/themes', '/theme-registry' => 'themes.read',
+            '/themes/install', '/themes/activate', '/themes/uninstall' => 'themes.manage',
+            '/marketplace/orders', '/marketplace/license/verify' => 'marketplace.read',
+            '/marketplace/purchase' => 'marketplace.write',
+            '/media/list' => 'media.read',
+            '/media/upload', '/media/transform' => 'media.write',
+            '/security/audit', '/security/mixed-content/scan' => 'security.read',
+            '/security/2fa/setup', '/security/2fa/disable' => 'security.self',
+            '/settings' => 'settings.read',
+            '/settings/save' => 'settings.write',
+            '/users' => 'users.read',
+            '/users/save' => 'users.write',
+            default => null,
+        };
     }
 
     /**

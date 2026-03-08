@@ -232,6 +232,8 @@ final class InstallerController
                 [
                     'username' => $username,
                     'password_hash' => $passwordHash,
+                    'role' => 'owner',
+                    'enabled' => true,
                 ],
             ],
             'features' => [

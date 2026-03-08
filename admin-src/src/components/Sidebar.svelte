@@ -1,5 +1,5 @@
 <script>
-  import { currentView, user, sidebarCollapsed, adminMenu } from '../lib/stores.js';
+  import { currentView, user, sidebarCollapsed, adminMenu, security } from '../lib/stores.js';
   import { api } from '../lib/api.js';
 
   const coreMenuItems = [
@@ -37,6 +37,35 @@
     return pluginIconMap[value] || pluginIconMap.plugin;
   }
 
+  function hasPermission(permission) {
+    const required = String(permission || '').trim().toLowerCase();
+    if (!required) return true;
+    const grants = Array.isArray($security?.permissions) ? $security.permissions : [];
+    if (grants.includes('*')) return true;
+    for (const grantRaw of grants) {
+      const grant = String(grantRaw || '').trim().toLowerCase();
+      if (!grant) continue;
+      if (grant === required) return true;
+      if (grant.endsWith('.*')) {
+        const prefix = grant.slice(0, -1);
+        if (prefix && required.startsWith(prefix)) return true;
+      }
+    }
+    return false;
+  }
+
+  const permissionByView = {
+    dashboard: 'dashboard.read',
+    content: 'content.read',
+    media: 'media.read',
+    forms: 'forms.read',
+    seo: 'seo.read',
+    plugins: 'plugins.read',
+    themes: 'themes.read',
+    security: 'security.read',
+    settings: 'settings.read'
+  };
+
   $: pluginMenuItems = ($adminMenu || [])
     .map((item) => {
       const viewId = routeToViewId(item?.route);
@@ -51,7 +80,7 @@
     .filter(Boolean);
 
   $: menuItems = (() => {
-    const rows = [...coreMenuItems];
+    const rows = coreMenuItems.filter((item) => hasPermission(permissionByView[item.viewId] || ''));
     for (const item of pluginMenuItems) {
       if (!rows.some((row) => row.id === item.id || row.viewId === item.viewId)) {
         rows.push(item);

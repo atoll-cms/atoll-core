@@ -11,6 +11,38 @@ use RuntimeException;
 
 final class SecurityManager
 {
+    public const ROLE_OWNER = 'owner';
+    public const ROLE_EDITOR = 'editor';
+    public const ROLE_SUPPORT = 'support';
+
+    /** @var array<string, array<int, string>> */
+    private const ROLE_PERMISSIONS = [
+        self::ROLE_OWNER => ['*'],
+        self::ROLE_EDITOR => [
+            'dashboard.read',
+            'content.*',
+            'forms.*',
+            'media.*',
+            'seo.read',
+            'plugins.read',
+            'themes.read',
+            'marketplace.read',
+            'security.self',
+        ],
+        self::ROLE_SUPPORT => [
+            'dashboard.read',
+            'content.read',
+            'forms.read',
+            'media.read',
+            'seo.read',
+            'plugins.read',
+            'themes.read',
+            'marketplace.read',
+            'security.read',
+            'security.self',
+        ],
+    ];
+
     private string $auditFile;
     private bool $sessionEnabled;
     private bool $sessionSecure;
@@ -220,6 +252,94 @@ final class SecurityManager
         return is_string($value) ? $value : null;
     }
 
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function currentUserRecord(): ?array
+    {
+        $username = $this->currentUser();
+        if ($username === null) {
+            return null;
+        }
+
+        $users = Config::get($this->config, 'users', []);
+        if (!is_array($users)) {
+            return null;
+        }
+
+        foreach ($users as $user) {
+            if (!is_array($user)) {
+                continue;
+            }
+            if ((string) ($user['username'] ?? '') !== $username) {
+                continue;
+            }
+
+            return $user;
+        }
+
+        return null;
+    }
+
+    public function normalizeRole(string $role): string
+    {
+        $normalized = strtolower(trim($role));
+        return match ($normalized) {
+            self::ROLE_OWNER, self::ROLE_EDITOR, self::ROLE_SUPPORT => $normalized,
+            default => self::ROLE_OWNER,
+        };
+    }
+
+    public function currentUserRole(): string
+    {
+        $record = $this->currentUserRecord();
+        if ($record === null) {
+            return self::ROLE_OWNER;
+        }
+
+        return $this->normalizeRole((string) ($record['role'] ?? self::ROLE_OWNER));
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function currentUserPermissions(): array
+    {
+        $role = $this->currentUserRole();
+        return self::ROLE_PERMISSIONS[$role] ?? self::ROLE_PERMISSIONS[self::ROLE_OWNER];
+    }
+
+    public function hasPermission(string $permission): bool
+    {
+        $permission = strtolower(trim($permission));
+        if ($permission === '') {
+            return false;
+        }
+
+        $grants = $this->currentUserPermissions();
+        if (in_array('*', $grants, true)) {
+            return true;
+        }
+
+        foreach ($grants as $grant) {
+            $grant = strtolower(trim($grant));
+            if ($grant === '') {
+                continue;
+            }
+            if ($grant === $permission) {
+                return true;
+            }
+            if (str_ends_with($grant, '.*')) {
+                $prefix = substr($grant, 0, -1);
+                if ($prefix !== '' && str_starts_with($permission, $prefix)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public function isAuthenticated(): bool
     {
         if (!$this->ensureSessionStarted()) {
@@ -228,6 +348,13 @@ final class SecurityManager
 
         $user = $this->currentUser();
         if ($user === null) {
+            return false;
+        }
+
+        $record = $this->currentUserRecord();
+        if ($record === null || (array_key_exists('enabled', $record) && !(bool) $record['enabled'])) {
+            $this->recordAudit('auth.session_invalid_user', ['user' => $user]);
+            $this->logout();
             return false;
         }
 

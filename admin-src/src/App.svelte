@@ -25,7 +25,12 @@
       const me = await api('/admin/api/me');
       user.set(me.user);
       csrf.set(me.csrf);
-      security.update((s) => ({ ...s, twofaEnabled: !!me?.security?.twofa_enabled }));
+      security.update((s) => ({
+        ...s,
+        twofaEnabled: !!me?.security?.twofa_enabled,
+        role: String(me?.security?.role || 'owner'),
+        permissions: Array.isArray(me?.security?.permissions) ? me.security.permissions : []
+      }));
 
       const [col, plug, plugReg, thm, thmReg, menuData, widgetData, sett, audit] = await Promise.all([
         api('/admin/api/collections'),
